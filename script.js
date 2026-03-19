@@ -3,6 +3,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const PLANILHA_URL = "https://script.google.com/macros/s/AKfycbzhJdbeZfxkHgh3cQrK_YlhBCuhZyLhM_9jYkAnCPmbz-aYpv7845740KySuhjTzdIb/exec";
 const LS_USER_ID = "pascoa_user_id";
 const LS_NICKNAME = "pascoa_nickname";
+const LS_FORUM_USER = "forumUser"; // Chave específica para cache do fórum
 
 const RARITY_CONFIG = {
     comum: { label: "Comum", emoji: "🥚", className: "comum", points: 5 },
@@ -147,7 +148,6 @@ const setupRealtimeSubscriptions = () => {
     Object.values(subscriptions).forEach(sub => sub?.unsubscribe?.());
     subscriptions = {};
 
-    // Assinar mudanças no próprio usuário (via RLS seguro)
     subscriptions.users = supabaseClient
         .channel(`user-${state.user.id}`)
         .on("postgres_changes", { event: "*", schema: "public", table: "users", filter: `id=eq.${state.user.id}` }, (payload) => {
@@ -156,7 +156,6 @@ const setupRealtimeSubscriptions = () => {
         })
         .subscribe();
 
-    // Assinar mudanças nos próprios resgates (via RLS seguro)
     subscriptions.redemptions = supabaseClient
         .channel(`redemptions-user-${state.user.id}`)
         .on("postgres_changes", { event: "*", schema: "public", table: "redemptions", filter: `user_id=eq.${state.user.id}` }, (payload) => {
@@ -167,7 +166,6 @@ const setupRealtimeSubscriptions = () => {
         })
         .subscribe();
 
-    // Admin: assinar novos resgates (apenas se for admin)
     if (state.user?.is_admin) {
         subscriptions.allRedemptions = supabaseClient
             .channel("all-redemptions")
@@ -180,9 +178,7 @@ const setupRealtimeSubscriptions = () => {
     }
 };
 
-// ✅ SEGURO: Usa RPC ao invés de SELECT direto
 const refreshUserData = async () => {
-    // Usa a política RLS que permite ver próprio usuário
     const { data } = await supabaseClient
         .from("users")
         .select("*")
@@ -200,7 +196,6 @@ const generateUUID = () => window.crypto?.randomUUID?.() || "xxxxxxxx-xxxx-4xxx-
     return (c === "x" ? r : (r & 0x3 | 0x8)).toString(16);
 });
 
-// ✅ SEGURO: Busca usuário por nickname (usado apenas em criação/verificação)
 const fetchUserByNickname = async (nickname) => {
     const { data } = await supabaseClient
         .from("users")
@@ -210,7 +205,6 @@ const fetchUserByNickname = async (nickname) => {
     return data;
 };
 
-// ✅ SEGURO: Criação de usuário com verificação de autenticação
 const createUser = async (nickname, isAdmin = false) => {
     const newUser = {
         id: generateUUID(),
@@ -221,7 +215,6 @@ const createUser = async (nickname, isAdmin = false) => {
         is_admin: isAdmin
     };
     
-    // Insere e retorna o usuário criado
     const { data, error } = await supabaseClient
         .from("users")
         .insert(newUser)
@@ -232,26 +225,67 @@ const createUser = async (nickname, isAdmin = false) => {
     return data;
 };
 
+// ✅ FUNÇÃO MELHORADA: Tenta múltiplas formas de obter o username do fórum
 async function pegarUsernameForum() {
-    try {
-        const resposta = await fetch("/forum");
-        const html = await resposta.text();
-        const regex = /_userdata\["username"\]\s*=\s*"([^"]+)"/;
-        const match = html.match(regex);
-
-        if (match && match[1]) {
-            const username = match[1];
-            localStorage.setItem("forumUser", username);
-            return username;
-        }
-        throw new Error("Não autenticado no fórum");
-    } catch (err) {
-        console.error("Erro ao buscar username:", err);
-        const fallback = localStorage.getItem("forumUser");
-        if (fallback) return fallback;
-        showToast("error", "Erro", "Você precisa estar logado no fórum RCC");
-        throw err;
+    // 1. Primeiro tenta do localStorage (cache mais rápido)
+    const cachedUser = localStorage.getItem(LS_FORUM_USER);
+    if (cachedUser) {
+        console.log("Usando usuário do cache:", cachedUser);
+        return cachedUser;
     }
+
+    // 2. Tenta buscar do fórum com múltiplas tentativas
+    const tentativas = ["/forum", "/forum/", "/home", "/"];
+    let lastError = null;
+    
+    for (const endpoint of tentativas) {
+        try {
+            console.log(`Tentando buscar username em: ${endpoint}`);
+            const resposta = await fetch(endpoint, {
+                method: 'GET',
+                credentials: 'include', // Importante: envia cookies de sessão
+                headers: {
+                    'Accept': 'text/html'
+                }
+            });
+            
+            if (!resposta.ok) {
+                console.log(`Endpoint ${endpoint} retornou ${resposta.status}`);
+                continue;
+            }
+            
+            const html = await resposta.text();
+            
+            // Múltiplos padrões de regex para diferentes formatos possíveis
+            const padroes = [
+                /_userdata\["username"\]\s*=\s*"([^"]+)"/,
+                /_userdata\['username'\]\s*=\s*'([^']+)'/,
+                /username\s*=\s*"([^"]+)"/i,
+                /"username":\s*"([^"]+)"/,
+                /user\s*name:\s*(\w+)/i
+            ];
+            
+            for (const regex of padroes) {
+                const match = html.match(regex);
+                if (match && match[1]) {
+                    const username = match[1].trim();
+                    if (username && username !== "null" && username !== "undefined") {
+                        console.log("Username encontrado:", username);
+                        localStorage.setItem(LS_FORUM_USER, username);
+                        return username;
+                    }
+                }
+            }
+            
+        } catch (err) {
+            console.error(`Erro ao tentar ${endpoint}:`, err);
+            lastError = err;
+        }
+    }
+    
+    // 3. Se chegou aqui, não conseguiu pegar do fórum
+    console.error("Não foi possível obter username do fórum após todas as tentativas");
+    throw new Error("Não autenticado no fórum");
 }
 
 async function buscarCargosPlanilha() {
@@ -272,9 +306,34 @@ function verificarAdminPorCargo(nickname) {
     return CARGOS_ADMIN.includes(usuario.cargo.toLowerCase());
 }
 
+// ✅ FUNÇÃO PRINCIPAL MELHORADA: Não abre modal automaticamente, tenta fallback
 const hydrateUser = async () => {
+    let forumUsername = null;
+    let tentativas = 0;
+    const maxTentativas = 3;
+
+    // Tenta pegar do fórum algumas vezes com delay
+    while (!forumUsername && tentativas < maxTentativas) {
+        try {
+            forumUsername = await pegarUsernameForum();
+            break;
+        } catch (err) {
+            tentativas++;
+            console.log(`Tentativa ${tentativas} falhou, aguardando...`);
+            if (tentativas < maxTentativas) {
+                await new Promise(resolve => setTimeout(resolve, 1000)); // Aguarda 1s entre tentativas
+            }
+        }
+    }
+
+    // Se ainda não tem username, mostra toast de erro mas NÃO abre modal automaticamente
+    if (!forumUsername) {
+        showToast("error", "Erro de Autenticação", "Você precisa estar logado no fórum RCC. Clique em 'Entrar' se já estiver logado.");
+        // Não abre o modal aqui - deixa o usuário clicar manualmente se necessário
+        return;
+    }
+
     try {
-        const forumUsername = await pegarUsernameForum();
         await buscarCargosPlanilha();
         
         const isAdmin = verificarAdminPorCargo(forumUsername);
@@ -282,7 +341,6 @@ const hydrateUser = async () => {
         let user = await fetchUserByNickname(forumUsername);
         
         if (user) {
-            // ✅ SEGURO: Atualiza status de admin se necessário
             if (user.is_admin !== isAdmin) {
                 const { error } = await supabaseClient
                     .from("users")
@@ -291,7 +349,6 @@ const hydrateUser = async () => {
                 if (!error) user.is_admin = isAdmin;
             }
         } else {
-            // ✅ SEGURO: Cria novo usuário
             user = await createUser(forumUsername, isAdmin);
         }
         
@@ -300,13 +357,21 @@ const hydrateUser = async () => {
         localStorage.setItem(LS_NICKNAME, user.nickname);
         updateUserUI();
         setupRealtimeSubscriptions();
+        await refreshAll();
         
     } catch (err) {
-        openModal("nicknameModal");
+        console.error("Erro ao configurar usuário:", err);
+        showToast("error", "Erro", "Erro ao configurar usuário. Tente recarregar a página.");
     }
 };
 
-async function salvarApelido(event) {
+// ✅ FUNÇÃO MANUAL: Só abre modal quando usuário clica explicitamente
+async function abrirModalNicknameManual() {
+    openModal("nicknameModal");
+}
+
+// ✅ FUNÇÃO DE EMERGÊNCIA: Se usuário não conseguir pelo fórum, pode inserir manualmente
+async function salvarApelidoManual(event) {
     event.preventDefault();
     const nickname = $id("nicknameInput").value.trim();
     if (!nickname) return showToast("error", "Erro", "Informe um apelido");
@@ -325,6 +390,9 @@ async function salvarApelido(event) {
                 .eq("id", user.id);
             if (!error) user.is_admin = isAdmin;
         }
+        
+        // Salva no cache como se fosse do fórum
+        localStorage.setItem(LS_FORUM_USER, nickname);
         
         state.user = user;
         localStorage.setItem(LS_USER_ID, user.id);
@@ -366,7 +434,6 @@ const updateUserUI = () => {
     $id("meusPremiosTotal").textContent = formatNumber(state.user.prizes_received);
 };
 
-// ✅ SEGURO: Apenas SELECT em egg_types (permitido por RLS para todos)
 const loadEggTypes = async () => {
     const { data } = await supabaseClient
         .from("egg_types")
@@ -415,7 +482,6 @@ const getLimitText = (type) => {
     return limits[type] || "";
 };
 
-// ✅ SEGURO: Apenas SELECT em prizes (permitido por RLS para todos)
 const loadPrizes = async () => {
     const { data } = await supabaseClient
         .from("prizes")
@@ -590,7 +656,6 @@ const renderPrizes = () => {
     });
 };
 
-// ✅ SEGURO: Apenas SELECT em próprios redemptions (RLS filtra por user_id)
 const loadRedemptions = async () => {
     if (!state.user) return;
     const { data } = await supabaseClient
@@ -645,7 +710,6 @@ const renderRedemptions = () => {
     state.redemptions.forEach(r => r._viewed = true);
 };
 
-// ✅ SEGURO: Ranking público (não expõe dados sensíveis)
 const loadRanking = async () => {
     const orderBy = state.rankingMode === "ovos" ? "eggs_found" : "points";
 
@@ -677,7 +741,6 @@ async function alternarRanking(mode) {
 function iniciarResgateCodigo() {
     if (!state.user) {
         showToast("error", "Erro", "Escolha um apelido primeiro");
-        openModal("nicknameModal");
         return;
     }
 
@@ -692,7 +755,6 @@ function iniciarResgateCodigo() {
     openModal("comprovacaoModal");
 }
 
-// ✅ SEGURO: Usa RPC que verifica auth.uid() internamente
 async function confirmarComprovacao(event) {
     event.preventDefault();
 
@@ -743,7 +805,6 @@ async function confirmarComprovacao(event) {
     }
 }
 
-// ✅ SEGURO: Usa RPC que verifica auth.uid() e saldo
 async function trocarPremio(prizeId) {
     if (!state.user) return showToast("error", "Erro", "Escolha um apelido primeiro");
 
@@ -788,11 +849,9 @@ function showAdminTab(tab) {
     document.querySelectorAll(".admin-section").forEach(s => s.classList.toggle("active", s.id === `admin-${tab}`));
 }
 
-// ✅ SEGURO: Todas as funções admin usam RPC que verifica is_admin
 async function loadAdminData() {
     if (!state.user?.is_admin) return;
 
-    // Estatísticas via RPC segura
     const { data: stats } = await supabaseClient.rpc("get_admin_stats");
     if (stats) {
         const s = Array.isArray(stats) ? stats[0] : stats;
@@ -802,17 +861,14 @@ async function loadAdminData() {
         $id("statPending").textContent = formatNumber(s.pending_redemptions);
     }
 
-    // Resgates pendentes via RPC segura
     const { data: pending } = await supabaseClient.rpc("get_pending_redemptions");
     state.adminData.pending = pending || [];
     renderPendingRedemptions();
 
-    // Códigos via RPC segura
     const { data: codes } = await supabaseClient.rpc("get_all_codes");
     state.adminData.codes = codes || [];
     renderAdminCodes();
 
-    // Prêmios via RPC segura
     const { data: prizes } = await supabaseClient.rpc("get_all_prizes");
     state.adminData.prizes = prizes || [];
     renderAdminPrizes();
@@ -895,7 +951,6 @@ function viewProof(id, url, desc, user, code) {
     openModal("viewProofModal");
 }
 
-// ✅ SEGURO: Usa RPC que verifica is_admin
 async function aprovarResgate(redemptionId) {
     const { data, error } = await supabaseClient.rpc("approve_redemption", {
         p_redemption_id: redemptionId,
@@ -917,7 +972,6 @@ function abrirRejeicao(redemptionId) {
     openModal("rejectModal");
 }
 
-// ✅ SEGURO: Usa RPC que verifica is_admin
 async function confirmarRejeicao(event) {
     event.preventDefault();
 
@@ -1021,7 +1075,6 @@ function renderAdminPrizes() {
     }).join("");
 }
 
-// ✅ SEGURO: Usa RPC que verifica is_admin
 async function atualizarEstoque(prizeId) {
     const newStock = parseInt($id(`stock-${prizeId}`).value);
 
@@ -1057,8 +1110,6 @@ function editarPremio(prizeId) {
     openModal("editPremioModal");
 }
 
-// ⚠️ ATENÇÃO: Esta função ainda usa acesso direto. Idealmente deveria ter uma RPC também
-// Porém, como é operação de admin e tem RLS, está parcialmente protegida
 async function salvarEdicaoPremio(event) {
     event.preventDefault();
 
@@ -1071,7 +1122,6 @@ async function salvarEdicaoPremio(event) {
         description: $id("editPremioDescricao").value
     };
 
-    // RLS protege: apenas admins podem atualizar
     const { error } = await supabaseClient
         .from("prizes")
         .update(updates)
@@ -1089,7 +1139,6 @@ async function salvarEdicaoPremio(event) {
     renderPrizes();
 }
 
-// ✅ SEGURO: Usa RPC que verifica is_admin
 async function gerarCodigos(event) {
     event.preventDefault();
 
@@ -1142,8 +1191,6 @@ async function gerarCodigos(event) {
     }
 }
 
-// ⚠️ ATENÇÃO: Esta função ainda usa acesso direto. Idealmente deveria ter uma RPC também
-// Porém, como é operação de admin e tem RLS, está parcialmente protegida
 async function salvarPremio(event) {
     event.preventDefault();
 
@@ -1158,7 +1205,6 @@ async function salvarPremio(event) {
         active: true
     };
 
-    // RLS protege: apenas admins podem inserir
     const { error } = await supabaseClient
         .from("prizes")
         .insert(prize);
@@ -1190,8 +1236,17 @@ async function refreshAll() {
     renderRanking();
 }
 
+// ✅ INICIALIZAÇÃO: Aguarda DOM e tenta autenticar automaticamente
 document.addEventListener("DOMContentLoaded", async () => {
     if (!ensureSupabase()) return;
+    
+    // Tenta autenticar automaticamente pelo fórum
     await hydrateUser();
-    if (state.user) await refreshAll();
+    
+    // Se não conseguiu autenticar, mostra mensagem mas não obriga
+    if (!state.user) {
+        console.log("Aguardando autenticação do fórum...");
+        // Não faz nada - aguarda usuário estar logado no fórum
+        // Ou pode adicionar um botão "Entrar" visível na interface
+    }
 });
