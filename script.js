@@ -1,4 +1,4 @@
-    const SUPABASE_URL = "https://gjxlapydpafwvyohovhj.supabase.co";
+const SUPABASE_URL = "https://gjxlapydpafwvyohovhj.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdqeGxhcHlkcGFmd3Z5b2hvdmhqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIxNDc3NTIsImV4cCI6MjA4NzcyMzc1Mn0.ni9szYqdrFWz3HcwYuOZaBFgcFddDoYSyZEakSQho-c";
 const PLANILHA_URL = "https://script.google.com/macros/s/AKfycbzhJdbeZfxkHgh3cQrK_YlhBCuhZyLhM_9jYkAnCPmbz-aYpv7845740KySuhjTzdIb/exec";
 const LS_USER_ID = "pascoa_user_id";
@@ -994,7 +994,7 @@ function renderAdminCodes() {
         `;
     }).join("");
 }
-    
+
 function filtrarCodigos() {
     renderAdminCodes();
 }
