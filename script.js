@@ -992,7 +992,8 @@ function renderAdminCodes() {
                 </td>
             </tr>
         `;
-    })
+    }).join("");
+}
     
 function filtrarCodigos() {
     renderAdminCodes();
