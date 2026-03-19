@@ -217,7 +217,6 @@ const createUser = async (nickname, isAdmin = false) => {
 };
 
 async function pegarUsernameForum() {
-    // REMOVIDO CACHE - sempre busca do fórum
     const tentativas = ["/forum", "/forum/", "/home", "/"];
     let lastError = null;
     
@@ -290,16 +289,11 @@ const hydrateUser = async () => {
     }
 
     try {
-        // REMOVIDO: Busca de cargos da planilha
-        // REMOVIDO: verificarAdminPorCargo - agora só usa is_admin do Supabase
-        
         let user = await fetchUserByNickname(forumUsername);
         
         if (!user) {
-            // Novo usuário sempre começa como não-admin (is_admin: false)
             user = await createUser(forumUsername, false);
         }
-        // Não atualiza mais is_admin baseado em planilha - só usa o que está no banco
         
         state.user = user;
         localStorage.setItem(LS_USER_ID, user.id);
@@ -324,15 +318,10 @@ async function salvarApelidoManual(event) {
     if (!nickname) return showToast("error", "Erro", "Informe um apelido");
 
     try {
-        // REMOVIDO: Busca de cargos da planilha
-        // REMOVIDO: verificarAdminPorCargo
-        
         let user = await fetchUserByNickname(nickname);
         if (!user) {
-            // Cria como não-admin por padrão
             user = await createUser(nickname, false);
         }
-        // Não atualiza is_admin - usa o valor do banco
         
         state.user = user;
         localStorage.setItem(LS_USER_ID, user.id);
@@ -574,7 +563,6 @@ const renderRankingList = () => {
     }).join("");
 };
 
-// ✅ FUNÇÃO ADICIONADA: renderRanking que estava faltando
 const renderRanking = () => {
     renderPodium();
     renderRankingList();
@@ -822,18 +810,18 @@ function showAdminTab(tab) {
     document.querySelectorAll(".admin-section").forEach(s => s.classList.toggle("active", s.id === `admin-${tab}`));
 }
 
-// ✅ CORREÇÃO: Verificar se stats existe e é válido antes de acessar propriedades
+// ✅ CORREÇÃO: Adicionado p_admin_id em todas as chamadas RPC de admin
 async function loadAdminData() {
     if (!state.user?.is_admin) return;
 
     try {
-        const { data: stats, error: statsError } = await supabaseClient.rpc("get_admin_stats");
+        const { data: stats, error: statsError } = await supabaseClient.rpc("get_admin_stats", {
+            p_admin_id: state.user.id
+        });
         
-        // Verifica se não houve erro e se stats existe e tem dados válidos
         if (!statsError && stats && (Array.isArray(stats) ? stats.length > 0 : Object.keys(stats).length > 0)) {
             const s = Array.isArray(stats) ? stats[0] : stats;
             
-            // Verifica se cada elemento existe antes de atualizar
             const statTotalUsers = $id("statTotalUsers");
             const statTotalCodes = $id("statTotalCodes");
             const statActiveCodes = $id("statActiveCodes");
@@ -845,7 +833,6 @@ async function loadAdminData() {
             if (statPending) statPending.textContent = formatNumber(s.pending_redemptions || 0);
         } else {
             console.warn("Stats retornou vazio, undefined ou erro:", statsError);
-            // Define valores padrão como 0 se os elementos existirem
             const statTotalUsers = $id("statTotalUsers");
             const statTotalCodes = $id("statTotalCodes");
             const statActiveCodes = $id("statActiveCodes");
@@ -857,15 +844,21 @@ async function loadAdminData() {
             if (statPending) statPending.textContent = "0";
         }
 
-        const { data: pending } = await supabaseClient.rpc("get_pending_redemptions");
+        const { data: pending } = await supabaseClient.rpc("get_pending_redemptions", {
+            p_admin_id: state.user.id
+        });
         state.adminData.pending = pending || [];
         renderPendingRedemptions();
 
-        const { data: codes } = await supabaseClient.rpc("get_all_codes");
+        const { data: codes } = await supabaseClient.rpc("get_all_codes", {
+            p_admin_id: state.user.id
+        });
         state.adminData.codes = codes || [];
         renderAdminCodes();
 
-        const { data: prizes } = await supabaseClient.rpc("get_all_prizes");
+        const { data: prizes } = await supabaseClient.rpc("get_all_prizes", {
+            p_admin_id: state.user.id
+        });
         state.adminData.prizes = prizes || [];
         renderAdminPrizes();
     } catch (err) {
@@ -1079,10 +1072,12 @@ function renderAdminPrizes() {
     }).join("");
 }
 
+// ✅ CORREÇÃO: Adicionado p_admin_id na chamada RPC
 async function atualizarEstoque(prizeId) {
     const newStock = parseInt($id(`stock-${prizeId}`)?.value || 0);
 
     const { data, error } = await supabaseClient.rpc("update_prize_stock", {
+        p_admin_id: state.user.id,
         p_prize_id: prizeId,
         p_new_stock: newStock
     });
@@ -1147,6 +1142,7 @@ async function salvarEdicaoPremio(event) {
     renderPrizes();
 }
 
+// ✅ CORREÇÃO: Adicionado p_admin_id na chamada RPC
 async function gerarCodigos(event) {
     event.preventDefault();
 
@@ -1160,6 +1156,7 @@ async function gerarCodigos(event) {
 
     for (let i = 0; i < qtd; i++) {
         const { data } = await supabaseClient.rpc("create_egg_code", {
+            p_admin_id: state.user.id,
             p_egg_type: tipo,
             p_location_hint: local || null
         });
@@ -1241,7 +1238,7 @@ async function refreshAll() {
     renderEggTypes();
     renderPrizes();
     renderRedemptions();
-    renderRanking(); // ✅ Agora existe!
+    renderRanking();
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
