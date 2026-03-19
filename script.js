@@ -985,7 +985,6 @@ function renderAdminCodes() {
                 <td>
                     ${c.redeemed_by_nickname ? `<strong>${escapeHtml(c.redeemed_by_nickname)}</strong>` : (foiUsado ? "<em>Processando...</em>" : "-")}
                 </td>
-                <td>${formatDateTime(c.created_at)}</td>
                 <td>
                     <button class="btn-icon copy" onclick="navigator.clipboard.writeText('${escapeHtml(c.code)}'); showToast('success', 'Copiado', 'Código copiado!')" title="Copiar">
                         <i class="fa-solid fa-copy"></i>
