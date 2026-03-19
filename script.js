@@ -3,7 +3,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const PLANILHA_URL = "https://script.google.com/macros/s/AKfycbzhJdbeZfxkHgh3cQrK_YlhBCuhZyLhM_9jYkAnCPmbz-aYpv7845740KySuhjTzdIb/exec";
 const LS_USER_ID = "pascoa_user_id";
 const LS_NICKNAME = "pascoa_nickname";
-const LS_FORUM_USER = "forumUser";
 
 const RARITY_CONFIG = {
     comum: { label: "Comum", emoji: "🥚", className: "comum", points: 5 },
@@ -12,19 +11,6 @@ const RARITY_CONFIG = {
     epico: { label: "Epico", emoji: "👑", className: "epico", points: 50 },
     lendario: { label: "Lendario", emoji: "🏆", className: "lendario", points: 100 },
     coelhao: { label: "Coelhao", emoji: "🐰", className: "coelhao", points: 500 }
-};
-
-const CARGOS_ADMIN = ["lider", "vice-lider", "diretor", "gerente", "supervisor", "analista", "ministro", "capacitador"];
-
-const getHabboAvatarUrl = (nickname, size = "b", action = "std", direction = 2, headDirection = 2, gesture = "std") => {
-    if (!nickname) return null;
-    const cleanNick = nickname.trim().toLowerCase().replace(/\s+/g, ".");
-    return `https://www.habbo.com.br/habbo-imaging/avatarimage?user=${encodeURIComponent(cleanNick)}&size=${size}&action=${action}&direction=${direction}&head_direction=${headDirection}&gesture=${gesture}`;
-};
-
-const getHabboAvatarUrlV2 = (nickname, size = "l") => {
-    if (!nickname) return null;
-    return `https://www.habboapi.com.br/avatar.php?user=${encodeURIComponent(nickname)}&size=${size}&action=std&direction=2&head_direction=3&gesture=sml`;
 };
 
 const state = {
@@ -40,8 +26,7 @@ const state = {
         pending: [],
         stats: null
     },
-    currentCode: null,
-    cargosPlanilha: []
+    currentCode: null
 };
 
 let supabaseClient = null;
@@ -232,12 +217,7 @@ const createUser = async (nickname, isAdmin = false) => {
 };
 
 async function pegarUsernameForum() {
-    const cachedUser = localStorage.getItem(LS_FORUM_USER);
-    if (cachedUser && cachedUser !== "null" && cachedUser !== "undefined") {
-        console.log("Usando usuário do cache:", cachedUser);
-        return cachedUser;
-    }
-
+    // REMOVIDO CACHE - sempre busca do fórum
     const tentativas = ["/forum", "/forum/", "/home", "/"];
     let lastError = null;
     
@@ -271,7 +251,6 @@ async function pegarUsernameForum() {
                     const username = match[1].trim();
                     if (username && username !== "null" && username !== "undefined") {
                         console.log("Username encontrado:", username);
-                        localStorage.setItem(LS_FORUM_USER, username);
                         return username;
                     }
                 }
@@ -285,24 +264,6 @@ async function pegarUsernameForum() {
     
     console.error("Não foi possível obter username do fórum");
     throw new Error("Não autenticado no fórum");
-}
-
-async function buscarCargosPlanilha() {
-    try {
-        const response = await fetch(PLANILHA_URL);
-        const data = await response.json();
-        state.cargosPlanilha = data || [];
-        return data;
-    } catch (err) {
-        console.error("Erro ao buscar cargos:", err);
-        return [];
-    }
-}
-
-function verificarAdminPorCargo(nickname) {
-    const usuario = state.cargosPlanilha.find(u => u.nick.toLowerCase() === nickname.toLowerCase());
-    if (!usuario) return false;
-    return CARGOS_ADMIN.includes(usuario.cargo.toLowerCase());
 }
 
 const hydrateUser = async () => {
@@ -329,23 +290,16 @@ const hydrateUser = async () => {
     }
 
     try {
-        await buscarCargosPlanilha();
-        
-        const isAdmin = verificarAdminPorCargo(forumUsername);
+        // REMOVIDO: Busca de cargos da planilha
+        // REMOVIDO: verificarAdminPorCargo - agora só usa is_admin do Supabase
         
         let user = await fetchUserByNickname(forumUsername);
         
-        if (user) {
-            if (user.is_admin !== isAdmin) {
-                const { error } = await supabaseClient
-                    .from("users")
-                    .update({ is_admin: isAdmin })
-                    .eq("id", user.id);
-                if (!error) user.is_admin = isAdmin;
-            }
-        } else {
-            user = await createUser(forumUsername, isAdmin);
+        if (!user) {
+            // Novo usuário sempre começa como não-admin (is_admin: false)
+            user = await createUser(forumUsername, false);
         }
+        // Não atualiza mais is_admin baseado em planilha - só usa o que está no banco
         
         state.user = user;
         localStorage.setItem(LS_USER_ID, user.id);
@@ -370,21 +324,15 @@ async function salvarApelidoManual(event) {
     if (!nickname) return showToast("error", "Erro", "Informe um apelido");
 
     try {
-        await buscarCargosPlanilha();
-        const isAdmin = verificarAdminPorCargo(nickname);
+        // REMOVIDO: Busca de cargos da planilha
+        // REMOVIDO: verificarAdminPorCargo
         
         let user = await fetchUserByNickname(nickname);
         if (!user) {
-            user = await createUser(nickname, isAdmin);
-        } else if (user.is_admin !== isAdmin) {
-            const { error } = await supabaseClient
-                .from("users")
-                .update({ is_admin: isAdmin })
-                .eq("id", user.id);
-            if (!error) user.is_admin = isAdmin;
+            // Cria como não-admin por padrão
+            user = await createUser(nickname, false);
         }
-        
-        localStorage.setItem(LS_FORUM_USER, nickname);
+        // Não atualiza is_admin - usa o valor do banco
         
         state.user = user;
         localStorage.setItem(LS_USER_ID, user.id);
@@ -403,7 +351,7 @@ const updateUserUI = () => {
     if (!state.user) return;
     const { nickname, is_admin } = state.user;
 
-    const avatarUrl = getHabboAvatarUrl(nickname, "b");
+    const avatarUrl = `https://www.habbo.com.br/habbo-imaging/avatarimage?user=${encodeURIComponent(nickname)}&size=b&action=std&direction=2&head_direction=2&gesture=std`;
     const userAvatar = $id("userAvatar");
     const userDisplayName = $id("userDisplayName");
     const userDisplayRole = $id("userDisplayRole");
@@ -421,8 +369,7 @@ const updateUserUI = () => {
     
     if (mobileProfile) mobileProfile.style.display = "block";
     if (mobileProfileAvatar) {
-        const avatarUrlMobile = getHabboAvatarUrl(nickname, "b");
-        mobileProfileAvatar.innerHTML = `<img src="${avatarUrlMobile}" alt="avatar" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">`;
+        mobileProfileAvatar.innerHTML = `<img src="${avatarUrl}" alt="avatar" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">`;
     }
     if (mobileUserName) mobileUserName.textContent = nickname;
     if (mobileUserRole) mobileUserRole.textContent = is_admin ? "Administrador" : "Caçador";
@@ -526,7 +473,7 @@ const renderPodium = () => {
 
     podium.innerHTML = ordered.map((user, index) => {
         const actualPos = index === 1 ? 1 : index === 0 ? 2 : 3;
-        const avatarUrl = getHabboAvatarUrl(user.nickname, "l");
+        const avatarUrl = `https://www.habbo.com.br/habbo-imaging/avatarimage?user=${encodeURIComponent(user.nickname)}&size=l&action=std&direction=2&head_direction=3&gesture=sml`;
 
         return `
             <div class="podium-item pos-${actualPos}">
@@ -581,7 +528,7 @@ const renderRankingList = () => {
         else if (position === 2) posClass = "top-2";
         else if (position === 3) posClass = "top-3";
 
-        const avatarUrl = getHabboAvatarUrl(user.nickname, "m");
+        const avatarUrl = `https://www.habbo.com.br/habbo-imaging/avatarimage?user=${encodeURIComponent(user.nickname)}&size=m&action=std&direction=2&head_direction=2&gesture=std`;
         const mainValue = state.rankingMode === "ovos" ? user.eggs_found : user.points;
         const mainLabel = state.rankingMode === "ovos" ? "ovos" : "pontos";
         const mainIcon = state.rankingMode === "ovos" ? "fa-egg" : "fa-coins";
@@ -627,7 +574,7 @@ const renderRankingList = () => {
     }).join("");
 };
 
-// ✅ FUNÇÃO ADICIONADA: renderRanking (que estava faltando)
+// ✅ FUNÇÃO ADICIONADA: renderRanking que estava faltando
 const renderRanking = () => {
     renderPodium();
     renderRankingList();
@@ -875,15 +822,15 @@ function showAdminTab(tab) {
     document.querySelectorAll(".admin-section").forEach(s => s.classList.toggle("active", s.id === `admin-${tab}`));
 }
 
-// ✅ CORREÇÃO: Verificar se stats existe antes de acessar propriedades
+// ✅ CORREÇÃO: Verificar se stats existe e é válido antes de acessar propriedades
 async function loadAdminData() {
     if (!state.user?.is_admin) return;
 
     try {
-        const { data: stats } = await supabaseClient.rpc("get_admin_stats");
+        const { data: stats, error: statsError } = await supabaseClient.rpc("get_admin_stats");
         
-        // Verifica se stats existe e tem dados válidos
-        if (stats && stats.length > 0) {
+        // Verifica se não houve erro e se stats existe e tem dados válidos
+        if (!statsError && stats && (Array.isArray(stats) ? stats.length > 0 : Object.keys(stats).length > 0)) {
             const s = Array.isArray(stats) ? stats[0] : stats;
             
             // Verifica se cada elemento existe antes de atualizar
@@ -897,7 +844,17 @@ async function loadAdminData() {
             if (statActiveCodes) statActiveCodes.textContent = formatNumber(s.active_codes || 0);
             if (statPending) statPending.textContent = formatNumber(s.pending_redemptions || 0);
         } else {
-            console.warn("Stats retornou vazio ou undefined");
+            console.warn("Stats retornou vazio, undefined ou erro:", statsError);
+            // Define valores padrão como 0 se os elementos existirem
+            const statTotalUsers = $id("statTotalUsers");
+            const statTotalCodes = $id("statTotalCodes");
+            const statActiveCodes = $id("statActiveCodes");
+            const statPending = $id("statPending");
+            
+            if (statTotalUsers) statTotalUsers.textContent = "0";
+            if (statTotalCodes) statTotalCodes.textContent = "0";
+            if (statActiveCodes) statActiveCodes.textContent = "0";
+            if (statPending) statPending.textContent = "0";
         }
 
         const { data: pending } = await supabaseClient.rpc("get_pending_redemptions");
