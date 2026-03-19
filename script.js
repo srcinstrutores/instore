@@ -3,7 +3,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const PLANILHA_URL = "https://script.google.com/macros/s/AKfycbzhJdbeZfxkHgh3cQrK_YlhBCuhZyLhM_9jYkAnCPmbz-aYpv7845740KySuhjTzdIb/exec";
 const LS_USER_ID = "pascoa_user_id";
 const LS_NICKNAME = "pascoa_nickname";
-const LS_FORUM_USER = "forumUser"; // Chave específica para cache do fórum
+const LS_FORUM_USER = "forumUser";
 
 const RARITY_CONFIG = {
     comum: { label: "Comum", emoji: "🥚", className: "comum", points: 5 },
@@ -55,6 +55,7 @@ const formatDateTime = (value) => value ? new Date(value).toLocaleString("pt-BR"
 
 const showToast = (type, title, message) => {
     const toast = $id("toast");
+    if (!toast) return;
     toast.className = "toast " + type;
     toast.querySelector(".toast-icon").innerHTML = type === "error" ? '<i class="fa-solid fa-xmark"></i>' : '<i class="fa-solid fa-check"></i>';
     $id("toastTitle").textContent = title;
@@ -106,6 +107,7 @@ $id("premioImagem")?.addEventListener("input", (e) => {
     const url = e.target.value;
     const preview = $id("premioPreview");
     const text = $id("premioPreviewText");
+    if (!preview || !text) return;
     if (url) {
         preview.src = url;
         preview.style.display = "block";
@@ -125,6 +127,7 @@ $id("comprovacaoLink")?.addEventListener("input", (e) => {
     const url = e.target.value;
     const preview = $id("linkPreview");
     const img = $id("previewImageLink");
+    if (!preview || !img) return;
     if (url) {
         img.src = url;
         preview.style.display = "block";
@@ -147,6 +150,8 @@ let subscriptions = {};
 const setupRealtimeSubscriptions = () => {
     Object.values(subscriptions).forEach(sub => sub?.unsubscribe?.());
     subscriptions = {};
+
+    if (!state.user?.id) return;
 
     subscriptions.users = supabaseClient
         .channel(`user-${state.user.id}`)
@@ -179,6 +184,7 @@ const setupRealtimeSubscriptions = () => {
 };
 
 const refreshUserData = async () => {
+    if (!state.user?.id) return;
     const { data } = await supabaseClient
         .from("users")
         .select("*")
@@ -225,16 +231,13 @@ const createUser = async (nickname, isAdmin = false) => {
     return data;
 };
 
-// ✅ FUNÇÃO MELHORADA: Tenta múltiplas formas de obter o username do fórum
 async function pegarUsernameForum() {
-    // 1. Primeiro tenta do localStorage (cache mais rápido)
     const cachedUser = localStorage.getItem(LS_FORUM_USER);
-    if (cachedUser) {
+    if (cachedUser && cachedUser !== "null" && cachedUser !== "undefined") {
         console.log("Usando usuário do cache:", cachedUser);
         return cachedUser;
     }
 
-    // 2. Tenta buscar do fórum com múltiplas tentativas
     const tentativas = ["/forum", "/forum/", "/home", "/"];
     let lastError = null;
     
@@ -243,10 +246,8 @@ async function pegarUsernameForum() {
             console.log(`Tentando buscar username em: ${endpoint}`);
             const resposta = await fetch(endpoint, {
                 method: 'GET',
-                credentials: 'include', // Importante: envia cookies de sessão
-                headers: {
-                    'Accept': 'text/html'
-                }
+                credentials: 'include',
+                headers: { 'Accept': 'text/html' }
             });
             
             if (!resposta.ok) {
@@ -256,7 +257,6 @@ async function pegarUsernameForum() {
             
             const html = await resposta.text();
             
-            // Múltiplos padrões de regex para diferentes formatos possíveis
             const padroes = [
                 /_userdata\["username"\]\s*=\s*"([^"]+)"/,
                 /_userdata\['username'\]\s*=\s*'([^']+)'/,
@@ -283,8 +283,7 @@ async function pegarUsernameForum() {
         }
     }
     
-    // 3. Se chegou aqui, não conseguiu pegar do fórum
-    console.error("Não foi possível obter username do fórum após todas as tentativas");
+    console.error("Não foi possível obter username do fórum");
     throw new Error("Não autenticado no fórum");
 }
 
@@ -306,13 +305,11 @@ function verificarAdminPorCargo(nickname) {
     return CARGOS_ADMIN.includes(usuario.cargo.toLowerCase());
 }
 
-// ✅ FUNÇÃO PRINCIPAL MELHORADA: Não abre modal automaticamente, tenta fallback
 const hydrateUser = async () => {
     let forumUsername = null;
     let tentativas = 0;
     const maxTentativas = 3;
 
-    // Tenta pegar do fórum algumas vezes com delay
     while (!forumUsername && tentativas < maxTentativas) {
         try {
             forumUsername = await pegarUsernameForum();
@@ -321,15 +318,13 @@ const hydrateUser = async () => {
             tentativas++;
             console.log(`Tentativa ${tentativas} falhou, aguardando...`);
             if (tentativas < maxTentativas) {
-                await new Promise(resolve => setTimeout(resolve, 1000)); // Aguarda 1s entre tentativas
+                await new Promise(resolve => setTimeout(resolve, 1000));
             }
         }
     }
 
-    // Se ainda não tem username, mostra toast de erro mas NÃO abre modal automaticamente
     if (!forumUsername) {
-        showToast("error", "Erro de Autenticação", "Você precisa estar logado no fórum RCC. Clique em 'Entrar' se já estiver logado.");
-        // Não abre o modal aqui - deixa o usuário clicar manualmente se necessário
+        showToast("error", "Erro de Autenticação", "Você precisa estar logado no fórum RCC.");
         return;
     }
 
@@ -365,12 +360,10 @@ const hydrateUser = async () => {
     }
 };
 
-// ✅ FUNÇÃO MANUAL: Só abre modal quando usuário clica explicitamente
-async function abrirModalNicknameManual() {
+function abrirModalNicknameManual() {
     openModal("nicknameModal");
 }
 
-// ✅ FUNÇÃO DE EMERGÊNCIA: Se usuário não conseguir pelo fórum, pode inserir manualmente
 async function salvarApelidoManual(event) {
     event.preventDefault();
     const nickname = $id("nicknameInput").value.trim();
@@ -391,7 +384,6 @@ async function salvarApelidoManual(event) {
             if (!error) user.is_admin = isAdmin;
         }
         
-        // Salva no cache como se fosse do fórum
         localStorage.setItem(LS_FORUM_USER, nickname);
         
         state.user = user;
@@ -412,26 +404,47 @@ const updateUserUI = () => {
     const { nickname, is_admin } = state.user;
 
     const avatarUrl = getHabboAvatarUrl(nickname, "b");
-    $id("userAvatar").innerHTML = `<img src="${avatarUrl}" alt="avatar" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">`;
-    $id("userDisplayName").textContent = nickname;
-    $id("userDisplayRole").textContent = is_admin ? "Administrador" : "Caçador";
-    $id("userBadge").style.display = "flex";
+    const userAvatar = $id("userAvatar");
+    const userDisplayName = $id("userDisplayName");
+    const userDisplayRole = $id("userDisplayRole");
+    const userBadge = $id("userBadge");
+    
+    if (userAvatar) userAvatar.innerHTML = `<img src="${avatarUrl}" alt="avatar" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">`;
+    if (userDisplayName) userDisplayName.textContent = nickname;
+    if (userDisplayRole) userDisplayRole.textContent = is_admin ? "Administrador" : "Caçador";
+    if (userBadge) userBadge.style.display = "flex";
 
-    $id("mobileProfile").style.display = "block";
-    const avatarUrlMobile = getHabboAvatarUrl(nickname, "b");
-    $id("mobileProfileAvatar").innerHTML = `<img src="${avatarUrlMobile}" alt="avatar" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">`;
-    $id("mobileUserName").textContent = nickname;
-    $id("mobileUserRole").textContent = is_admin ? "Administrador" : "Caçador";
+    const mobileProfile = $id("mobileProfile");
+    const mobileProfileAvatar = $id("mobileProfileAvatar");
+    const mobileUserName = $id("mobileUserName");
+    const mobileUserRole = $id("mobileUserRole");
+    
+    if (mobileProfile) mobileProfile.style.display = "block";
+    if (mobileProfileAvatar) {
+        const avatarUrlMobile = getHabboAvatarUrl(nickname, "b");
+        mobileProfileAvatar.innerHTML = `<img src="${avatarUrlMobile}" alt="avatar" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">`;
+    }
+    if (mobileUserName) mobileUserName.textContent = nickname;
+    if (mobileUserRole) mobileUserRole.textContent = is_admin ? "Administrador" : "Caçador";
 
-    $id("adminNavSection").style.display = is_admin ? "block" : "none";
+    const adminNavSection = $id("adminNavSection");
+    if (adminNavSection) adminNavSection.style.display = is_admin ? "block" : "none";
 
-    $id("userPoints").textContent = formatNumber(state.user.points);
-    $id("userTotalOvos").textContent = formatNumber(state.user.eggs_found);
-    $id("userTotalPremios").textContent = formatNumber(state.user.prizes_received);
-    $id("saldoPontosLoja").textContent = formatNumber(state.user.points);
-    $id("meusPontosTotal").textContent = formatNumber(state.user.points);
-    $id("meusOvosTotal").textContent = formatNumber(state.user.eggs_found);
-    $id("meusPremiosTotal").textContent = formatNumber(state.user.prizes_received);
+    const userPoints = $id("userPoints");
+    const userTotalOvos = $id("userTotalOvos");
+    const userTotalPremios = $id("userTotalPremios");
+    const saldoPontosLoja = $id("saldoPontosLoja");
+    const meusPontosTotal = $id("meusPontosTotal");
+    const meusOvosTotal = $id("meusOvosTotal");
+    const meusPremiosTotal = $id("meusPremiosTotal");
+
+    if (userPoints) userPoints.textContent = formatNumber(state.user.points);
+    if (userTotalOvos) userTotalOvos.textContent = formatNumber(state.user.eggs_found);
+    if (userTotalPremios) userTotalPremios.textContent = formatNumber(state.user.prizes_received);
+    if (saldoPontosLoja) saldoPontosLoja.textContent = formatNumber(state.user.points);
+    if (meusPontosTotal) meusPontosTotal.textContent = formatNumber(state.user.points);
+    if (meusOvosTotal) meusOvosTotal.textContent = formatNumber(state.user.eggs_found);
+    if (meusPremiosTotal) meusPremiosTotal.textContent = formatNumber(state.user.prizes_received);
 };
 
 const loadEggTypes = async () => {
@@ -445,6 +458,8 @@ const loadEggTypes = async () => {
 
 const renderEggTypes = () => {
     const container = $id("guiaOvosLista");
+    if (!container) return;
+    
     const types = state.eggTypes.length ? state.eggTypes : Object.entries(RARITY_CONFIG).map(([id, cfg], i) => ({
         id, name: `Ovo ${cfg.label}`, points: cfg.points, description: "Recompensa padrão", rarity_order: i + 1
     }));
@@ -612,6 +627,12 @@ const renderRankingList = () => {
     }).join("");
 };
 
+// ✅ FUNÇÃO ADICIONADA: renderRanking (que estava faltando)
+const renderRanking = () => {
+    renderPodium();
+    renderRankingList();
+};
+
 const renderPrizes = () => {
     const containers = {
         comum: $id("premiosComum"),
@@ -621,17 +642,24 @@ const renderPrizes = () => {
         lendario: $id("premiosLendario")
     };
 
-    Object.values(containers).forEach(c => c.innerHTML = "");
-    $id("totalPremios").textContent = `${state.prizes.length} prêmios`;
+    Object.values(containers).forEach(c => { if(c) c.innerHTML = ""; });
+    
+    const totalPremios = $id("totalPremios");
+    if (totalPremios) totalPremios.textContent = `${state.prizes.length} prêmios`;
+
+    const hasAnyContainer = Object.values(containers).some(c => c !== null);
+    if (!hasAnyContainer) return;
 
     if (!state.prizes.length) {
-        Object.values(containers).forEach(c => c.innerHTML = `<div class="empty-state"><h3>Nenhum prêmio</h3></div>`);
+        Object.values(containers).forEach(c => { if(c) c.innerHTML = `<div class="empty-state"><h3>Nenhum prêmio</h3></div>`; });
         return;
     }
 
     state.prizes.forEach(prize => {
         const rarity = RARITY_CONFIG[prize.rarity] || RARITY_CONFIG.comum;
         const container = containers[prize.rarity] || containers.comum;
+        if (!container) return;
+        
         const hasPoints = (state.user?.points || 0) >= prize.cost_points;
         const hasStock = prize.stock > 0;
 
@@ -671,8 +699,8 @@ const renderRedemptions = () => {
     const full = $id("meuHistoricoCompleto");
 
     if (!state.redemptions.length) {
-        recent.innerHTML = `<div class="empty-state"><div style="font-size: 64px;">🧺</div><h3>Sua cesta está vazia</h3></div>`;
-        full.innerHTML = `<div class="empty-state"><h3>Nenhum resgate ainda</h3></div>`;
+        if (recent) recent.innerHTML = `<div class="empty-state"><div style="font-size: 64px;">🧺</div><h3>Sua cesta está vazia</h3></div>`;
+        if (full) full.innerHTML = `<div class="empty-state"><h3>Nenhum resgate ainda</h3></div>`;
         return;
     }
 
@@ -704,8 +732,8 @@ const renderRedemptions = () => {
         `;
     };
 
-    recent.innerHTML = state.redemptions.slice(0, 3).map((item, i) => buildCard(item, i)).join("");
-    full.innerHTML = state.redemptions.map((item, i) => buildCard(item, i)).join("");
+    if (recent) recent.innerHTML = state.redemptions.slice(0, 3).map((item, i) => buildCard(item, i)).join("");
+    if (full) full.innerHTML = state.redemptions.map((item, i) => buildCard(item, i)).join("");
 
     state.redemptions.forEach(r => r._viewed = true);
 };
@@ -725,8 +753,6 @@ const loadRanking = async () => {
     }
 
     state.ranking = data || [];
-    renderPodium();
-    renderRankingList();
 };
 
 async function alternarRanking(mode) {
@@ -849,33 +875,51 @@ function showAdminTab(tab) {
     document.querySelectorAll(".admin-section").forEach(s => s.classList.toggle("active", s.id === `admin-${tab}`));
 }
 
+// ✅ CORREÇÃO: Verificar se stats existe antes de acessar propriedades
 async function loadAdminData() {
     if (!state.user?.is_admin) return;
 
-    const { data: stats } = await supabaseClient.rpc("get_admin_stats");
-    if (stats) {
-        const s = Array.isArray(stats) ? stats[0] : stats;
-        $id("statTotalUsers").textContent = formatNumber(s.total_users);
-        $id("statTotalCodes").textContent = formatNumber(s.total_codes);
-        $id("statActiveCodes").textContent = formatNumber(s.active_codes);
-        $id("statPending").textContent = formatNumber(s.pending_redemptions);
+    try {
+        const { data: stats } = await supabaseClient.rpc("get_admin_stats");
+        
+        // Verifica se stats existe e tem dados válidos
+        if (stats && stats.length > 0) {
+            const s = Array.isArray(stats) ? stats[0] : stats;
+            
+            // Verifica se cada elemento existe antes de atualizar
+            const statTotalUsers = $id("statTotalUsers");
+            const statTotalCodes = $id("statTotalCodes");
+            const statActiveCodes = $id("statActiveCodes");
+            const statPending = $id("statPending");
+            
+            if (statTotalUsers) statTotalUsers.textContent = formatNumber(s.total_users || 0);
+            if (statTotalCodes) statTotalCodes.textContent = formatNumber(s.total_codes || 0);
+            if (statActiveCodes) statActiveCodes.textContent = formatNumber(s.active_codes || 0);
+            if (statPending) statPending.textContent = formatNumber(s.pending_redemptions || 0);
+        } else {
+            console.warn("Stats retornou vazio ou undefined");
+        }
+
+        const { data: pending } = await supabaseClient.rpc("get_pending_redemptions");
+        state.adminData.pending = pending || [];
+        renderPendingRedemptions();
+
+        const { data: codes } = await supabaseClient.rpc("get_all_codes");
+        state.adminData.codes = codes || [];
+        renderAdminCodes();
+
+        const { data: prizes } = await supabaseClient.rpc("get_all_prizes");
+        state.adminData.prizes = prizes || [];
+        renderAdminPrizes();
+    } catch (err) {
+        console.error("Erro ao carregar dados admin:", err);
+        showToast("error", "Erro", "Erro ao carregar painel administrativo");
     }
-
-    const { data: pending } = await supabaseClient.rpc("get_pending_redemptions");
-    state.adminData.pending = pending || [];
-    renderPendingRedemptions();
-
-    const { data: codes } = await supabaseClient.rpc("get_all_codes");
-    state.adminData.codes = codes || [];
-    renderAdminCodes();
-
-    const { data: prizes } = await supabaseClient.rpc("get_all_prizes");
-    state.adminData.prizes = prizes || [];
-    renderAdminPrizes();
 }
 
 function renderPendingRedemptions() {
     const container = $id("listaAprovacoes");
+    if (!container) return;
 
     if (!state.adminData.pending.length) {
         container.innerHTML = `
@@ -996,8 +1040,10 @@ async function confirmarRejeicao(event) {
 
 function renderAdminCodes() {
     const tbody = $id("corpoTabelaCodigos");
-    const filtroTipo = $id("filtroTipoOvo").value;
-    const filtroStatus = $id("filtroStatusCode").value;
+    if (!tbody) return;
+    
+    const filtroTipo = $id("filtroTipoOvo")?.value || "";
+    const filtroStatus = $id("filtroStatusCode")?.value || "";
 
     let codes = state.adminData.codes;
     if (filtroTipo) codes = codes.filter(c => c.egg_type === filtroTipo);
@@ -1044,6 +1090,7 @@ function filtrarCodigos() {
 
 function renderAdminPrizes() {
     const tbody = $id("corpoTabelaPremios");
+    if (!tbody) return;
 
     tbody.innerHTML = state.adminData.prizes.map(p => {
         const rarity = RARITY_CONFIG[p.rarity];
@@ -1076,7 +1123,7 @@ function renderAdminPrizes() {
 }
 
 async function atualizarEstoque(prizeId) {
-    const newStock = parseInt($id(`stock-${prizeId}`).value);
+    const newStock = parseInt($id(`stock-${prizeId}`)?.value || 0);
 
     const { data, error } = await supabaseClient.rpc("update_prize_stock", {
         p_prize_id: prizeId,
@@ -1104,8 +1151,10 @@ function editarPremio(prizeId) {
     $id("editPremioDescricao").value = prize.description || "";
 
     const preview = $id("editPremioPreview");
-    preview.src = prize.image_url;
-    preview.style.display = "block";
+    if (preview) {
+        preview.src = prize.image_url;
+        preview.style.display = "block";
+    }
 
     openModal("editPremioModal");
 }
@@ -1113,13 +1162,15 @@ function editarPremio(prizeId) {
 async function salvarEdicaoPremio(event) {
     event.preventDefault();
 
-    const id = $id("editPremioId").value;
+    const id = $id("editPremioId")?.value;
+    if (!id) return;
+
     const updates = {
-        title: $id("editPremioNome").value,
-        image_url: $id("editPremioImagem").value,
-        stock: parseInt($id("editPremioEstoque").value),
-        cost_points: parseInt($id("editPremioCusto").value),
-        description: $id("editPremioDescricao").value
+        title: $id("editPremioNome")?.value,
+        image_url: $id("editPremioImagem")?.value,
+        stock: parseInt($id("editPremioEstoque")?.value || 0),
+        cost_points: parseInt($id("editPremioCusto")?.value || 0),
+        description: $id("editPremioDescricao")?.value
     };
 
     const { error } = await supabaseClient
@@ -1142,9 +1193,9 @@ async function salvarEdicaoPremio(event) {
 async function gerarCodigos(event) {
     event.preventDefault();
 
-    const tipo = $id("codigoTipo").value;
-    const qtd = parseInt($id("codigoQuantidade").value);
-    const local = $id("codigoLocal").value;
+    const tipo = $id("codigoTipo")?.value;
+    const qtd = parseInt($id("codigoQuantidade")?.value || 0);
+    const local = $id("codigoLocal")?.value;
 
     if (!tipo || !qtd) return showToast("error", "Erro", "Preencha todos os campos");
 
@@ -1195,13 +1246,13 @@ async function salvarPremio(event) {
     event.preventDefault();
 
     const prize = {
-        title: $id("premioNome").value,
-        rarity: $id("premioCategoria").value,
-        cost_points: parseInt($id("premioCusto").value),
-        image_url: $id("premioImagem").value,
-        stock: parseInt($id("premioEstoque").value),
-        total_stock: parseInt($id("premioEstoque").value),
-        description: $id("premioDescricao").value,
+        title: $id("premioNome")?.value,
+        rarity: $id("premioCategoria")?.value,
+        cost_points: parseInt($id("premioCusto")?.value || 0),
+        image_url: $id("premioImagem")?.value,
+        stock: parseInt($id("premioEstoque")?.value || 0),
+        total_stock: parseInt($id("premioEstoque")?.value || 0),
+        description: $id("premioDescricao")?.value,
         active: true
     };
 
@@ -1233,20 +1284,15 @@ async function refreshAll() {
     renderEggTypes();
     renderPrizes();
     renderRedemptions();
-    renderRanking();
+    renderRanking(); // ✅ Agora existe!
 }
 
-// ✅ INICIALIZAÇÃO: Aguarda DOM e tenta autenticar automaticamente
 document.addEventListener("DOMContentLoaded", async () => {
     if (!ensureSupabase()) return;
     
-    // Tenta autenticar automaticamente pelo fórum
     await hydrateUser();
     
-    // Se não conseguiu autenticar, mostra mensagem mas não obriga
     if (!state.user) {
         console.log("Aguardando autenticação do fórum...");
-        // Não faz nada - aguarda usuário estar logado no fórum
-        // Ou pode adicionar um botão "Entrar" visível na interface
     }
 });
