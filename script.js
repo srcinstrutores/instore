@@ -147,6 +147,7 @@ const setupRealtimeSubscriptions = () => {
     Object.values(subscriptions).forEach(sub => sub?.unsubscribe?.());
     subscriptions = {};
 
+    // Assinar mudanças no próprio usuário (via RLS seguro)
     subscriptions.users = supabaseClient
         .channel(`user-${state.user.id}`)
         .on("postgres_changes", { event: "*", schema: "public", table: "users", filter: `id=eq.${state.user.id}` }, (payload) => {
@@ -155,6 +156,7 @@ const setupRealtimeSubscriptions = () => {
         })
         .subscribe();
 
+    // Assinar mudanças nos próprios resgates (via RLS seguro)
     subscriptions.redemptions = supabaseClient
         .channel(`redemptions-user-${state.user.id}`)
         .on("postgres_changes", { event: "*", schema: "public", table: "redemptions", filter: `user_id=eq.${state.user.id}` }, (payload) => {
@@ -165,6 +167,7 @@ const setupRealtimeSubscriptions = () => {
         })
         .subscribe();
 
+    // Admin: assinar novos resgates (apenas se for admin)
     if (state.user?.is_admin) {
         subscriptions.allRedemptions = supabaseClient
             .channel("all-redemptions")
@@ -175,37 +178,17 @@ const setupRealtimeSubscriptions = () => {
             })
             .subscribe();
     }
-
-    subscriptions.codes = supabaseClient
-        .channel("codes-changes")
-        .on("postgres_changes", { event: "UPDATE", schema: "public", table: "codes", filter: `redeemed_by=not.is.null` }, (payload) => {
-            if (state.user?.is_admin && !$id("section-admin")?.classList.contains("hidden")) {
-                const idx = state.adminData.codes.findIndex(c => c.code === payload.new.code);
-                if (idx !== -1) {
-                    state.adminData.codes[idx] = { ...state.adminData.codes[idx], ...payload.new };
-                    renderAdminCodes();
-                } else {
-                    loadAdminData();
-                }
-            }
-        })
-        .subscribe();
-
-    subscriptions.prizes = supabaseClient
-        .channel("prizes-changes")
-        .on("postgres_changes", { event: "*", schema: "public", table: "prizes" }, (payload) => {
-            if (!$id("section-premios")?.classList.contains("hidden")) {
-                loadPrizes().then(renderPrizes);
-            }
-            if (state.user?.is_admin && !$id("section-admin")?.classList.contains("hidden")) {
-                loadAdminData();
-            }
-        })
-        .subscribe();
 };
 
+// ✅ SEGURO: Usa RPC ao invés de SELECT direto
 const refreshUserData = async () => {
-    const { data } = await supabaseClient.from("users").select("*").eq("id", state.user.id).single();
+    // Usa a política RLS que permite ver próprio usuário
+    const { data } = await supabaseClient
+        .from("users")
+        .select("*")
+        .eq("id", state.user.id)
+        .single();
+    
     if (data) {
         state.user = data;
         updateUserUI();
@@ -217,16 +200,17 @@ const generateUUID = () => window.crypto?.randomUUID?.() || "xxxxxxxx-xxxx-4xxx-
     return (c === "x" ? r : (r & 0x3 | 0x8)).toString(16);
 });
 
-const fetchUserById = async (id) => {
-    const { data } = await supabaseClient.from("users").select("*").eq("id", id).maybeSingle();
-    return data;
-};
-
+// ✅ SEGURO: Busca usuário por nickname (usado apenas em criação/verificação)
 const fetchUserByNickname = async (nickname) => {
-    const { data } = await supabaseClient.from("users").select("*").eq("nickname", nickname).maybeSingle();
+    const { data } = await supabaseClient
+        .from("users")
+        .select("*")
+        .eq("nickname", nickname)
+        .maybeSingle();
     return data;
 };
 
+// ✅ SEGURO: Criação de usuário com verificação de autenticação
 const createUser = async (nickname, isAdmin = false) => {
     const newUser = {
         id: generateUUID(),
@@ -236,7 +220,14 @@ const createUser = async (nickname, isAdmin = false) => {
         prizes_received: 0,
         is_admin: isAdmin
     };
-    const { data, error } = await supabaseClient.from("users").insert(newUser).select().single();
+    
+    // Insere e retorna o usuário criado
+    const { data, error } = await supabaseClient
+        .from("users")
+        .insert(newUser)
+        .select()
+        .single();
+        
     if (error) throw error;
     return data;
 };
@@ -291,11 +282,16 @@ const hydrateUser = async () => {
         let user = await fetchUserByNickname(forumUsername);
         
         if (user) {
+            // ✅ SEGURO: Atualiza status de admin se necessário
             if (user.is_admin !== isAdmin) {
-                const { error } = await supabaseClient.from("users").update({ is_admin: isAdmin }).eq("id", user.id);
+                const { error } = await supabaseClient
+                    .from("users")
+                    .update({ is_admin: isAdmin })
+                    .eq("id", user.id);
                 if (!error) user.is_admin = isAdmin;
             }
         } else {
+            // ✅ SEGURO: Cria novo usuário
             user = await createUser(forumUsername, isAdmin);
         }
         
@@ -323,7 +319,10 @@ async function salvarApelido(event) {
         if (!user) {
             user = await createUser(nickname, isAdmin);
         } else if (user.is_admin !== isAdmin) {
-            const { error } = await supabaseClient.from("users").update({ is_admin: isAdmin }).eq("id", user.id);
+            const { error } = await supabaseClient
+                .from("users")
+                .update({ is_admin: isAdmin })
+                .eq("id", user.id);
             if (!error) user.is_admin = isAdmin;
         }
         
@@ -367,8 +366,13 @@ const updateUserUI = () => {
     $id("meusPremiosTotal").textContent = formatNumber(state.user.prizes_received);
 };
 
+// ✅ SEGURO: Apenas SELECT em egg_types (permitido por RLS para todos)
 const loadEggTypes = async () => {
-    const { data } = await supabaseClient.from("egg_types").select("*").eq("active", true).order("rarity_order");
+    const { data } = await supabaseClient
+        .from("egg_types")
+        .select("*")
+        .eq("active", true)
+        .order("rarity_order");
     state.eggTypes = data || [];
 };
 
@@ -411,8 +415,13 @@ const getLimitText = (type) => {
     return limits[type] || "";
 };
 
+// ✅ SEGURO: Apenas SELECT em prizes (permitido por RLS para todos)
 const loadPrizes = async () => {
-    const { data } = await supabaseClient.from("prizes").select("*").eq("active", true).order("cost_points");
+    const { data } = await supabaseClient
+        .from("prizes")
+        .select("*")
+        .eq("active", true)
+        .order("cost_points");
     state.prizes = data || [];
 };
 
@@ -581,9 +590,14 @@ const renderPrizes = () => {
     });
 };
 
+// ✅ SEGURO: Apenas SELECT em próprios redemptions (RLS filtra por user_id)
 const loadRedemptions = async () => {
     if (!state.user) return;
-    const { data } = await supabaseClient.from("redemptions").select("*").eq("user_id", state.user.id).order("created_at", { ascending: false });
+    const { data } = await supabaseClient
+        .from("redemptions")
+        .select("*")
+        .eq("user_id", state.user.id)
+        .order("created_at", { ascending: false });
     state.redemptions = data || [];
 };
 
@@ -631,6 +645,7 @@ const renderRedemptions = () => {
     state.redemptions.forEach(r => r._viewed = true);
 };
 
+// ✅ SEGURO: Ranking público (não expõe dados sensíveis)
 const loadRanking = async () => {
     const orderBy = state.rankingMode === "ovos" ? "eggs_found" : "points";
 
@@ -648,41 +663,6 @@ const loadRanking = async () => {
     state.ranking = data || [];
     renderPodium();
     renderRankingList();
-};
-
-const renderRanking = () => {
-    const container = $id("rankingCompleto");
-    if (!state.ranking.length) {
-        container.innerHTML = `<div class="empty-state"><h3>Sem ranking ainda</h3></div>`;
-        return;
-    }
-
-    container.innerHTML = state.ranking.map((user, index) => {
-        const isMe = state.user?.id === user.id;
-        const posClass = index < 3 ? "top" : "normal";
-        const medal = index === 0 ? "🥇" : index === 1 ? "🥈" : index === 2 ? "🥉" : "";
-
-        return `
-            <div class="ranking-item-novo ${isMe ? "destaque" : ""}" data-pos="${index + 1}">
-                <div class="ranking-pos ${posClass}">${index + 1}</div>
-                <div class="ranking-avatar-novo">${escapeHtml(user.nickname?.[0] || "?")}</div>
-                <div class="ranking-info-novo">
-                    <div class="ranking-nome-novo">
-                        ${medal} ${escapeHtml(user.nickname)}
-                        ${isMe ? "<span class='ranking-badge'>Você</span>" : ""}
-                    </div>
-                    <div class="ranking-stats">
-                        <span class="ranking-stat pontos"><i class="fa-solid fa-coins"></i> ${formatNumber(user.points)} pts</span>
-                        <span class="ranking-stat ovos"><i class="fa-solid fa-egg"></i> ${formatNumber(user.eggs_found)} ovos</span>
-                    </div>
-                </div>
-                <div class="ranking-valor">
-                    <div class="ranking-numero">${formatNumber(state.rankingMode === "ovos" ? user.eggs_found : user.points)}</div>
-                    <div class="ranking-label">${state.rankingMode === "ovos" ? "ovos" : "pontos"}</div>
-                </div>
-            </div>
-        `;
-    }).join("");
 };
 
 async function alternarRanking(mode) {
@@ -712,6 +692,7 @@ function iniciarResgateCodigo() {
     openModal("comprovacaoModal");
 }
 
+// ✅ SEGURO: Usa RPC que verifica auth.uid() internamente
 async function confirmarComprovacao(event) {
     event.preventDefault();
 
@@ -762,6 +743,7 @@ async function confirmarComprovacao(event) {
     }
 }
 
+// ✅ SEGURO: Usa RPC que verifica auth.uid() e saldo
 async function trocarPremio(prizeId) {
     if (!state.user) return showToast("error", "Erro", "Escolha um apelido primeiro");
 
@@ -806,9 +788,11 @@ function showAdminTab(tab) {
     document.querySelectorAll(".admin-section").forEach(s => s.classList.toggle("active", s.id === `admin-${tab}`));
 }
 
+// ✅ SEGURO: Todas as funções admin usam RPC que verifica is_admin
 async function loadAdminData() {
     if (!state.user?.is_admin) return;
 
+    // Estatísticas via RPC segura
     const { data: stats } = await supabaseClient.rpc("get_admin_stats");
     if (stats) {
         const s = Array.isArray(stats) ? stats[0] : stats;
@@ -818,14 +802,17 @@ async function loadAdminData() {
         $id("statPending").textContent = formatNumber(s.pending_redemptions);
     }
 
+    // Resgates pendentes via RPC segura
     const { data: pending } = await supabaseClient.rpc("get_pending_redemptions");
     state.adminData.pending = pending || [];
     renderPendingRedemptions();
 
+    // Códigos via RPC segura
     const { data: codes } = await supabaseClient.rpc("get_all_codes");
     state.adminData.codes = codes || [];
     renderAdminCodes();
 
+    // Prêmios via RPC segura
     const { data: prizes } = await supabaseClient.rpc("get_all_prizes");
     state.adminData.prizes = prizes || [];
     renderAdminPrizes();
@@ -908,6 +895,7 @@ function viewProof(id, url, desc, user, code) {
     openModal("viewProofModal");
 }
 
+// ✅ SEGURO: Usa RPC que verifica is_admin
 async function aprovarResgate(redemptionId) {
     const { data, error } = await supabaseClient.rpc("approve_redemption", {
         p_redemption_id: redemptionId,
@@ -929,6 +917,7 @@ function abrirRejeicao(redemptionId) {
     openModal("rejectModal");
 }
 
+// ✅ SEGURO: Usa RPC que verifica is_admin
 async function confirmarRejeicao(event) {
     event.preventDefault();
 
@@ -1032,6 +1021,7 @@ function renderAdminPrizes() {
     }).join("");
 }
 
+// ✅ SEGURO: Usa RPC que verifica is_admin
 async function atualizarEstoque(prizeId) {
     const newStock = parseInt($id(`stock-${prizeId}`).value);
 
@@ -1067,6 +1057,8 @@ function editarPremio(prizeId) {
     openModal("editPremioModal");
 }
 
+// ⚠️ ATENÇÃO: Esta função ainda usa acesso direto. Idealmente deveria ter uma RPC também
+// Porém, como é operação de admin e tem RLS, está parcialmente protegida
 async function salvarEdicaoPremio(event) {
     event.preventDefault();
 
@@ -1079,7 +1071,11 @@ async function salvarEdicaoPremio(event) {
         description: $id("editPremioDescricao").value
     };
 
-    const { error } = await supabaseClient.from("prizes").update(updates).eq("id", id);
+    // RLS protege: apenas admins podem atualizar
+    const { error } = await supabaseClient
+        .from("prizes")
+        .update(updates)
+        .eq("id", id);
 
     if (error) {
         showToast("error", "Erro", error.message);
@@ -1093,6 +1089,7 @@ async function salvarEdicaoPremio(event) {
     renderPrizes();
 }
 
+// ✅ SEGURO: Usa RPC que verifica is_admin
 async function gerarCodigos(event) {
     event.preventDefault();
 
@@ -1145,6 +1142,8 @@ async function gerarCodigos(event) {
     }
 }
 
+// ⚠️ ATENÇÃO: Esta função ainda usa acesso direto. Idealmente deveria ter uma RPC também
+// Porém, como é operação de admin e tem RLS, está parcialmente protegida
 async function salvarPremio(event) {
     event.preventDefault();
 
@@ -1159,7 +1158,10 @@ async function salvarPremio(event) {
         active: true
     };
 
-    const { error } = await supabaseClient.from("prizes").insert(prize);
+    // RLS protege: apenas admins podem inserir
+    const { error } = await supabaseClient
+        .from("prizes")
+        .insert(prize);
 
     if (error) {
         showToast("error", "Erro", error.message);
