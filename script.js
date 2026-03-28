@@ -1,1252 +1,1111 @@
-const SUPABASE_URL = "https://gjxlapydpafwvyohovhj.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdqeGxhcHlkcGFmd3Z5b2hvdmhqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIxNDc3NTIsImV4cCI6MjA4NzcyMzc1Mn0.ni9szYqdrFWz3HcwYuOZaBFgcFddDoYSyZEakSQho-c";
-const PLANILHA_URL = "https://script.google.com/macros/s/AKfycbzhJdbeZfxkHgh3cQrK_YlhBCuhZyLhM_9jYkAnCPmbz-aYpv7845740KySuhjTzdIb/exec";
-const LS_USER_ID = "pascoa_user_id";
-const LS_NICKNAME = "pascoa_nickname";
+        /**
+         * INStore Páscoa — script.js
+         * Autenticação via Supabase Auth (magic link ou OTP)
+         * Toda operação sensível é feita server-side (triggers / Edge Functions)
+         * O cliente NUNCA manipula pontos ou status diretamente.
+         *
+         * Configuração:
+         * 1. Substitua SUPABASE_URL e SUPABASE_ANON_KEY pelos seus valores.
+         * 2. Suba o schema SQL no Supabase.
+         * 3. Deploy da Edge Function sync-habbo-members.
+         */
 
-const RARITY_CONFIG = {
-    comum: { label: "Comum", emoji: "🥚", className: "comum", points: 5 },
-    incomum: { label: "Incomum", emoji: "🍀", className: "incomum", points: 10 },
-    raro: { label: "Raro", emoji: "💎", className: "raro", points: 30 },
-    epico: { label: "Epico", emoji: "👑", className: "epico", points: 50 },
-    lendario: { label: "Lendario", emoji: "🏆", className: "lendario", points: 100 },
-    coelhao: { label: "Coelhao", emoji: "🐰", className: "coelhao", points: 500 }
-};
+        // ═══════════════════════════════════════════════════
+        // CONFIGURAÇÃO
+        // ═══════════════════════════════════════════════════
+        const SUPABASE_URL     = "https://SEU_PROJETO.supabase.co"; // <-- ALTERE AQUI
+        const SUPABASE_ANON_KEY = "SUA_ANON_KEY"; // <-- ALTERE AQUI (pública — OK ficar no JS)
 
-const state = {
-    user: null,
-    eggTypes: [],
-    prizes: [],
-    redemptions: [],
-    ranking: [],
-    rankingMode: "pontos",
-    adminData: {
-        codes: [],
-        prizes: [],
-        pending: [],
-        stats: null
-    },
-    currentCode: null
-};
+        const { createClient } = supabase; // carregado via CDN no HTML
+        const db = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+            auth: {
+                autoRefreshToken: true,
+                persistSession: true,
+                detectSessionInUrl: true,
+            },
+        });
 
-let supabaseClient = null;
-let toastTimer = null;
+        // ═══════════════════════════════════════════════════
+        // ESTADO GLOBAL
+        // ═══════════════════════════════════════════════════
+        let currentUser   = null; // dados de auth.users (JWT)
+        let currentProfile = null; // dados de public.users
+        let rankingMode   = "pontos";
+        let pendingCodeId = null;  // id do código verificado aguardando comprovação
 
-const $id = (id) => document.getElementById(id);
-
-const escapeHtml = (value) => String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
-const formatNumber = (value) => new Intl.NumberFormat("pt-BR").format(Number(value || 0));
-const formatDateTime = (value) => value ? new Date(value).toLocaleString("pt-BR") : "-";
-
-const showToast = (type, title, message) => {
-    const toast = $id("toast");
-    if (!toast) return;
-    toast.className = "toast " + type;
-    toast.querySelector(".toast-icon").innerHTML = type === "error" ? '<i class="fa-solid fa-xmark"></i>' : '<i class="fa-solid fa-check"></i>';
-    $id("toastTitle").textContent = title;
-    $id("toastMessage").textContent = message;
-    toast.classList.add("show");
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => toast.classList.remove("show"), 3500);
-};
-
-const openModal = (id) => $id(id)?.classList.add("active");
-const closeModal = (id) => $id(id)?.classList.remove("active");
-
-function toggleMobileMenu() {
-    const sidebar = $id("sidebarNav");
-    const overlay = $id("sidebarOverlay");
-    const menuBtn = $id("mobileMenuBtn");
-    const isOpen = sidebar.classList.contains("active");
-    sidebar.classList.toggle("active", !isOpen);
-    overlay.classList.toggle("active", !isOpen);
-    menuBtn.classList.toggle("active", !isOpen);
-}
-
-function closeMobileMenu() {
-    if ($id("sidebarNav").classList.contains("active")) toggleMobileMenu();
-}
-
-function showSection(section) {
-    document.querySelectorAll(".section-content").forEach(el => el.classList.add("hidden"));
-    $id(`section-${section}`)?.classList.remove("hidden");
-    document.querySelectorAll(".nav-item").forEach(btn => {
-        btn.classList.toggle("active", btn.getAttribute("data-section") === section);
-    });
-    if (section === "admin" && state.user?.is_admin) {
-        loadAdminData();
-    }
-}
-
-function fecharComprovacaoModal() { closeModal("comprovacaoModal"); }
-function fecharResultadoModal() { closeModal("resultadoModal"); }
-function fecharViewProofModal() { closeModal("viewProofModal"); }
-function fecharRejectModal() { closeModal("rejectModal"); }
-function fecharCodigoModal() { closeModal("codigoModal"); }
-function fecharPremioModal() { closeModal("premioModal"); }
-function fecharEditPremioModal() { closeModal("editPremioModal"); }
-function abrirCodigoModal() { openModal("codigoModal"); }
-function abrirPremioModal() { openModal("premioModal"); }
-
-$id("premioImagem")?.addEventListener("input", (e) => {
-    const url = e.target.value;
-    const preview = $id("premioPreview");
-    const text = $id("premioPreviewText");
-    if (!preview || !text) return;
-    if (url) {
-        preview.src = url;
-        preview.style.display = "block";
-        text.style.display = "none";
-        preview.onerror = () => {
-            preview.style.display = "none";
-            text.style.display = "block";
-            text.textContent = "Erro ao carregar imagem";
+        // ═══════════════════════════════════════════════════
+        // DADOS DOS OVOS (somente informação pública/estática)
+        // ═══════════════════════════════════════════════════
+        const TIPOS_OVO = {
+            comum:    { emoji: "🥚", nome: "Ovo Comum",    pontos: 5,   maxUsos: "Ilimitado", classe: "comum",    desc: "Encontrado facilmente pelos corredores da companhia." },
+            incomum:  { emoji: "🍀", nome: "Ovo Incomum",  pontos: 10,  maxUsos: "10 usos",  classe: "incomum", desc: "Mais raro, escondido em lugares menos óbvios." },
+            raro:     { emoji: "💎", nome: "Ovo Raro",     pontos: 30,  maxUsos: "5 usos",   classe: "raro",    desc: "Difícil de encontrar, vale a pena procurar!" },
+            epico:    { emoji: "👑", nome: "Ovo Épico",    pontos: 50,  maxUsos: "1 uso",    classe: "epico",   desc: "Extremamente raro. Apenas um jogador pode resgatar." },
+            lendario: { emoji: "🏆", nome: "Ovo Lendário", pontos: 100, maxUsos: "1 uso",    classe: "lendario",desc: "Lendário. Encontrá-lo é uma conquista histórica." },
+            coelhao:  { emoji: "🐰", nome: "Coelhão",      pontos: 500, maxUsos: "ÚNICO",    classe: "coelhao", desc: "O ovo supremo. Apenas um existe no mundo inteiro." },
         };
-    } else {
-        preview.style.display = "none";
-        text.style.display = "block";
-    }
-});
 
-$id("comprovacaoLink")?.addEventListener("input", (e) => {
-    const url = e.target.value;
-    const preview = $id("linkPreview");
-    const img = $id("previewImageLink");
-    if (!preview || !img) return;
-    if (url) {
-        img.src = url;
-        preview.style.display = "block";
-    } else {
-        preview.style.display = "none";
-    }
-});
+        // ═══════════════════════════════════════════════════
+        // INICIALIZAÇÃO
+        // ═══════════════════════════════════════════════════
+        document.addEventListener("DOMContentLoaded", async () => {
+            renderGuiaOvos();
+            await iniciarSessao();
+            setupRealtimeRanking();
+        });
 
-const ensureSupabase = () => {
-    if (!window.supabase?.createClient) {
-        showToast("error", "Erro", "Biblioteca Supabase não carregou");
-        return false;
-    }
-    supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-    return true;
-};
-
-let subscriptions = {};
-
-const setupRealtimeSubscriptions = () => {
-    Object.values(subscriptions).forEach(sub => sub?.unsubscribe?.());
-    subscriptions = {};
-
-    if (!state.user?.id) return;
-
-    subscriptions.users = supabaseClient
-        .channel(`user-${state.user.id}`)
-        .on("postgres_changes", { event: "*", schema: "public", table: "users", filter: `id=eq.${state.user.id}` }, (payload) => {
-            state.user = { ...state.user, ...payload.new };
-            updateUserUI();
-        })
-        .subscribe();
-
-    subscriptions.redemptions = supabaseClient
-        .channel(`redemptions-user-${state.user.id}`)
-        .on("postgres_changes", { event: "*", schema: "public", table: "redemptions", filter: `user_id=eq.${state.user.id}` }, (payload) => {
-            loadRedemptions();
-            if (payload.old?.status === "pending" && payload.new?.status === "approved") {
-                refreshUserData();
+        async function iniciarSessao() {
+            const { data: { session } } = await db.auth.getSession();
+            if (session) {
+                currentUser = session.user;
+                await carregarPerfil();
+            } else {
+                mostrarLoginModal();
             }
-        })
-        .subscribe();
+        }
 
-    if (state.user?.is_admin) {
-        subscriptions.allRedemptions = supabaseClient
-            .channel("all-redemptions")
-            .on("postgres_changes", { event: "INSERT", schema: "public", table: "redemptions" }, (payload) => {
-                if (!$id("section-admin")?.classList.contains("hidden")) {
-                    loadAdminData();
+        // ═══════════════════════════════════════════════════
+        // AUTENTICAÇÃO — Integração Fórum + AppScript + Supabase
+        // ═══════════════════════════════════════════════════
+        async function iniciarSessao() {
+            try {
+                // 1. Puxa o nick do fórum (Abaixo você configura essa função)
+                const nickForum = await obterNickDoForum();
+
+                if (!nickForum) {
+                    mostrarAcessoNegado("Você precisa estar logado no fórum INStore para acessar a loja.");
+                    return;
                 }
-            })
-            .subscribe();
-    }
-};
 
-const refreshUserData = async () => {
-    if (!state.user?.id) return;
-    const { data } = await supabaseClient
-        .from("users")
-        .select("*")
-        .eq("id", state.user.id)
-        .single();
-    
-    if (data) {
-        state.user = data;
-        updateUserUI();
-    }
-};
+                // 2. Puxa a lista do Google Apps Script e verifica se o usuário está nela
+                const infoINS = await verificarSeEIns(nickForum);
 
-const generateUUID = () => window.crypto?.randomUUID?.() || "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
-    const r = Math.random() * 16 | 0;
-    return (c === "x" ? r : (r & 0x3 | 0x8)).toString(16);
-});
+                if (!infoINS.valido) {
+                    mostrarAcessoNegado(`Acesso negado. O nick "${nickForum}" não foi encontrado na lista da INS.`);
+                    return;
+                }
 
-const fetchUserByNickname = async (nickname) => {
-    const { data } = await supabaseClient
-        .from("users")
-        .select("*")
-        .eq("nickname", nickname)
-        .maybeSingle();
-    return data;
-};
+                // 3. Sucesso! Configura o usuário atual
+                currentUser = { 
+                    id: nickForum, 
+                    role: infoINS.isAdmin ? 'admin' : 'user' 
+                };
+                
+                // 4. Conecta com o Supabase para carregar ou criar o perfil!
+                await carregarPerfilNoSupabase(nickForum, currentUser.role);
 
-const createUser = async (nickname, isAdmin = false) => {
-    const newUser = {
-        id: generateUUID(),
-        nickname: nickname,
-        points: 0,
-        eggs_found: 0,
-        prizes_received: 0,
-        is_admin: isAdmin
-    };
-    
-    const { data, error } = await supabaseClient
-        .from("users")
-        .insert(newUser)
-        .select()
-        .single();
-        
-    if (error) throw error;
-    return data;
-};
-
-async function pegarUsernameForum() {
-    const tentativas = ["/forum", "/forum/", "/home", "/"];
-    let lastError = null;
-    
-    for (const endpoint of tentativas) {
-        try {
-            console.log(`Tentando buscar username em: ${endpoint}`);
-            const resposta = await fetch(endpoint, {
-                method: 'GET',
-                credentials: 'include',
-                headers: { 'Accept': 'text/html' }
-            });
-            
-            if (!resposta.ok) {
-                console.log(`Endpoint ${endpoint} retornou ${resposta.status}`);
-                continue;
+            } catch (error) {
+                console.error("Erro na autenticação:", error);
+                mostrarAcessoNegado("Ocorreu um erro ao verificar sua conta. Tente novamente mais tarde.");
             }
+        }
+
+        // Função que lê todos os membros do AppScript e verifica acesso
+        async function verificarSeEIns(nick) {
+            // A URL exata que você passou
+            const urlAppScript = 'https://script.google.com/macros/s/AKfycbzhJdbeZfxkHgh3cQrK_YlhBCuhZyLhM_9jYkAnCPmbz-aYpv7845740KySuhjTzdIb/exec';
             
-            const html = await resposta.text();
+            try {
+                // Faz o download do JSON
+                const resposta = await fetch(urlAppScript);
+                const listaMembros = await resposta.json();
+                
+                // Procura o membro na lista (ignorando maiúsculas/minúsculas para evitar erros)
+                const membroEncontrado = listaMembros.find(
+                    membro => membro.nick.toLowerCase() === nick.toLowerCase()
+                );
+                
+                if (membroEncontrado) {
+                    // Verifica se no JSON ele tem "SIM" no adminstore
+                    const isAdmin = membroEncontrado.adminstore === "SIM";
+                    
+                    return { valido: true, isAdmin: isAdmin, dados: membroEncontrado };
+                } else {
+                    return { valido: false, isAdmin: false, dados: null };
+                }
+            } catch (erro) {
+                console.error("Erro ao ler dados do Apps Script:", erro);
+                return { valido: false, isAdmin: false, dados: null };
+            }
+        }
+
+        // ═══════════════════════════════════════════════════
+        // CONEXÃO COM SUPABASE (Onde salvamos pontos e histórico)
+        // ═══════════════════════════════════════════════════
+        async function carregarPerfilNoSupabase(nickForum, roleAppScript) {
+            // Tenta buscar o perfil do usuário na tabela 'profiles' do Supabase
+            const { data: perfilExistente, error } = await db
+                .from("profiles")
+                .select("*")
+                .ilike("nickname", nickForum)
+                .single();
+
+            // Se o erro for PGRST116, significa que o usuário é novo e não tem registro ainda
+            if (error && error.code === "PGRST116") {
+                console.log("Novo usuário detectado, criando no Supabase...");
+                
+                // Como não usamos mais a auth nativa do Supabase, precisamos gerar um ID pra ele
+                // Você pode usar o próprio nick como ID ou gerar um aleatório se sua tabela for UUID
+                const { data: novoPerfil, error: erroCriacao } = await db.from("profiles").insert({
+                    id: crypto.randomUUID(), // Gera um ID único se a tabela pedir UUID
+                    nickname: nickForum,
+                    habbo_user: nickForum, // O avatar puxa desse campo
+                    role: roleAppScript,   // "admin" ou "user"
+                    points: 0              // Começa com 0 pontos
+                }).select().single();
+
+                if (erroCriacao) {
+                    console.error("Erro ao salvar no Supabase:", erroCriacao);
+                    mostrarToast("Erro", "Falha ao conectar ao banco de dados.", "error");
+                    return;
+                }
+                
+                currentProfile = novoPerfil;
             
-            const padroes = [
-                /_userdata\["username"\]\s*=\s*"([^"]+)"/,
-                /_userdata\['username'\]\s*=\s*'([^']+)'/,
-                /username\s*=\s*"([^"]+)"/i,
-                /"username":\s*"([^"]+)"/,
-                /user\s*name:\s*(\w+)/i
-            ];
+            } else if (error) {
+                console.error("Erro inesperado no Supabase:", error);
+                mostrarToast("Erro", "O banco de dados (Supabase) está indisponível.", "error");
+                return;
             
-            for (const regex of padroes) {
-                const match = html.match(regex);
-                if (match && match[1]) {
-                    const username = match[1].trim();
-                    if (username && username !== "null" && username !== "undefined") {
-                        console.log("Username encontrado:", username);
-                        return username;
-                    }
+            } else {
+                // O perfil já existe no Supabase!
+                currentProfile = perfilExistente;
+                
+                // BÔNUS: Se o cargo dele mudou no AppScript (virou admin ou perdeu admin), atualiza no Supabase
+                if (currentProfile.role !== roleAppScript) {
+                    const { data: perfilAtualizado } = await db.from("profiles")
+                        .update({ role: roleAppScript })
+                        .eq("id", currentProfile.id)
+                        .select().single();
+                        
+                    if (perfilAtualizado) currentProfile = perfilAtualizado;
                 }
             }
-            
-        } catch (err) {
-            console.error(`Erro ao tentar ${endpoint}:`, err);
-            lastError = err;
-        }
-    }
-    
-    console.error("Não foi possível obter username do fórum");
-    throw new Error("Não autenticado no fórum");
-}
 
-const hydrateUser = async () => {
-    let forumUsername = null;
-    let tentativas = 0;
-    const maxTentativas = 3;
+            // --- A PARTIR DAQUI A SESSÃO ESTÁ 100% PRONTA E CONECTADA NO SUPABASE ---
+            atualizarUI();
 
-    while (!forumUsername && tentativas < maxTentativas) {
-        try {
-            forumUsername = await pegarUsernameForum();
-            break;
-        } catch (err) {
-            tentativas++;
-            console.log(`Tentativa ${tentativas} falhou, aguardando...`);
-            if (tentativas < maxTentativas) {
-                await new Promise(resolve => setTimeout(resolve, 1000));
+            // Libera as abas de admin se o usuário for administrador ("SIM" no JSON)
+            if (currentProfile.role === "admin") {
+                document.getElementById("adminNavSection").style.display = "block";
+                carregarDadosAdmin();
             }
+
+            // Puxa histórico de ovos e resgates
+            carregarDados();
         }
-    }
 
-    if (!forumUsername) {
-        showToast("error", "Erro de Autenticação", "Você precisa estar logado no fórum RCC.");
-        return;
-    }
-
-    try {
-        let user = await fetchUserByNickname(forumUsername);
-        
-        if (!user) {
-            user = await createUser(forumUsername, false);
-        }
-        
-        state.user = user;
-        localStorage.setItem(LS_USER_ID, user.id);
-        localStorage.setItem(LS_NICKNAME, user.nickname);
-        updateUserUI();
-        setupRealtimeSubscriptions();
-        await refreshAll();
-        
-    } catch (err) {
-        console.error("Erro ao configurar usuário:", err);
-        showToast("error", "Erro", "Erro ao configurar usuário. Tente recarregar a página.");
-    }
-};
-
-function abrirModalNicknameManual() {
-    openModal("nicknameModal");
-}
-
-async function salvarApelidoManual(event) {
-    event.preventDefault();
-    const nickname = $id("nicknameInput").value.trim();
-    if (!nickname) return showToast("error", "Erro", "Informe um apelido");
-
-    try {
-        let user = await fetchUserByNickname(nickname);
-        if (!user) {
-            user = await createUser(nickname, false);
-        }
-        
-        state.user = user;
-        localStorage.setItem(LS_USER_ID, user.id);
-        localStorage.setItem(LS_NICKNAME, user.nickname);
-        closeModal("nicknameModal");
-        updateUserUI();
-        setupRealtimeSubscriptions();
-        await refreshAll();
-        showToast("success", "Bem-vindo!", `Boas caçadas, ${nickname}!`);
-    } catch (error) {
-        showToast("error", "Erro", "Não foi possível salvar");
-    }
-}
-
-const updateUserUI = () => {
-    if (!state.user) return;
-    const { nickname, is_admin } = state.user;
-
-    const avatarUrl = `https://www.habbo.com.br/habbo-imaging/avatarimage?user=${encodeURIComponent(nickname)}&size=b&action=std&direction=2&head_direction=2&gesture=std`;
-    const userAvatar = $id("userAvatar");
-    const userDisplayName = $id("userDisplayName");
-    const userDisplayRole = $id("userDisplayRole");
-    const userBadge = $id("userBadge");
-    
-    if (userAvatar) userAvatar.innerHTML = `<img src="${avatarUrl}" alt="avatar" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">`;
-    if (userDisplayName) userDisplayName.textContent = nickname;
-    if (userDisplayRole) userDisplayRole.textContent = is_admin ? "Administrador" : "Caçador";
-    if (userBadge) userBadge.style.display = "flex";
-
-    const mobileProfile = $id("mobileProfile");
-    const mobileProfileAvatar = $id("mobileProfileAvatar");
-    const mobileUserName = $id("mobileUserName");
-    const mobileUserRole = $id("mobileUserRole");
-    
-    if (mobileProfile) mobileProfile.style.display = "block";
-    if (mobileProfileAvatar) {
-        mobileProfileAvatar.innerHTML = `<img src="${avatarUrl}" alt="avatar" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">`;
-    }
-    if (mobileUserName) mobileUserName.textContent = nickname;
-    if (mobileUserRole) mobileUserRole.textContent = is_admin ? "Administrador" : "Caçador";
-
-    const adminNavSection = $id("adminNavSection");
-    if (adminNavSection) adminNavSection.style.display = is_admin ? "block" : "none";
-
-    const userPoints = $id("userPoints");
-    const userTotalOvos = $id("userTotalOvos");
-    const userTotalPremios = $id("userTotalPremios");
-    const saldoPontosLoja = $id("saldoPontosLoja");
-    const meusPontosTotal = $id("meusPontosTotal");
-    const meusOvosTotal = $id("meusOvosTotal");
-    const meusPremiosTotal = $id("meusPremiosTotal");
-
-    if (userPoints) userPoints.textContent = formatNumber(state.user.points);
-    if (userTotalOvos) userTotalOvos.textContent = formatNumber(state.user.eggs_found);
-    if (userTotalPremios) userTotalPremios.textContent = formatNumber(state.user.prizes_received);
-    if (saldoPontosLoja) saldoPontosLoja.textContent = formatNumber(state.user.points);
-    if (meusPontosTotal) meusPontosTotal.textContent = formatNumber(state.user.points);
-    if (meusOvosTotal) meusOvosTotal.textContent = formatNumber(state.user.eggs_found);
-    if (meusPremiosTotal) meusPremiosTotal.textContent = formatNumber(state.user.prizes_received);
-};
-
-const loadEggTypes = async () => {
-    const { data } = await supabaseClient
-        .from("egg_types")
-        .select("*")
-        .eq("active", true)
-        .order("rarity_order");
-    state.eggTypes = data || [];
-};
-
-const renderEggTypes = () => {
-    const container = $id("guiaOvosLista");
-    if (!container) return;
-    
-    const types = state.eggTypes.length ? state.eggTypes : Object.entries(RARITY_CONFIG).map(([id, cfg], i) => ({
-        id, name: `Ovo ${cfg.label}`, points: cfg.points, description: "Recompensa padrão", rarity_order: i + 1
-    }));
-
-    container.innerHTML = types.map(egg => {
-        const rarity = RARITY_CONFIG[egg.id];
-        return `
-            <div class="guia-item ${rarity?.className || "comum"}">
-                <div class="guia-header">
-                    <div class="guia-emoji">${rarity?.emoji || "🥚"}</div>
-                    <div class="guia-titulo">
-                        <div class="guia-nome">${escapeHtml(egg.name)}</div>
-                        <div class="guia-quantidade">${rarity?.label || egg.id} • ${formatNumber(egg.points)} pts</div>
-                    </div>
-                </div>
-                <div class="guia-recompensa">
-                    <div class="guia-pontos">${formatNumber(egg.points)} pontos</div>
-                    <div class="guia-bonus">${getLimitText(egg.id)}</div>
-                </div>
-                <div class="guia-desc">${escapeHtml(egg.description)}</div>
-            </div>
-        `;
-    }).join("");
-};
-
-const getLimitText = (type) => {
-    const limits = {
-        comum: "Resgates ilimitados",
-        incomum: "Máx 10 resgates por ovo",
-        raro: "Máx 5 resgates por ovo",
-        epico: "Apenas 1 resgate por ovo",
-        lendario: "Apenas 1 resgate por ovo",
-        coelhao: "ÚNICO - 1 resgate total!"
-    };
-    return limits[type] || "";
-};
-
-const loadPrizes = async () => {
-    const { data } = await supabaseClient
-        .from("prizes")
-        .select("*")
-        .eq("active", true)
-        .order("cost_points");
-    state.prizes = data || [];
-};
-
-const renderPodium = () => {
-    const podium = document.getElementById("podiumTop3");
-    if (!podium) return;
-
-    const top3 = state.ranking.slice(0, 3);
-
-    if (top3.length === 0) {
-        podium.innerHTML = `
-            <div style="text-align: center; color: var(--text-tertiary); padding: 40px;">
-                <i class="fa-solid fa-trophy" style="font-size: 48px; margin-bottom: 16px; opacity: 0.5;"></i>
-                <p>Ranking vazio</p>
-            </div>
-        `;
-        return;
-    }
-
-    const ordered = [top3[1], top3[0], top3[2]].filter(Boolean);
-
-    podium.innerHTML = ordered.map((user, index) => {
-        const actualPos = index === 1 ? 1 : index === 0 ? 2 : 3;
-        const avatarUrl = `https://www.habbo.com.br/habbo-imaging/avatarimage?user=${encodeURIComponent(user.nickname)}&size=l&action=std&direction=2&head_direction=3&gesture=sml`;
-
-        return `
-            <div class="podium-item pos-${actualPos}">
-                <div class="podium-avatar-wrapper">
-                    <div class="podium-badge">${actualPos === 1 ? "👑" : actualPos}</div>
-                    <div class="podium-avatar-container">
-                        <img src="${avatarUrl}" 
-                             alt="${escapeHtml(user.nickname)}"
-                             onerror="this.src='https://via.placeholder.com/110x160/667eea/ffffff?text=${encodeURIComponent(user.nickname[0] || "?")}'"
-                             loading="lazy">
-                    </div>
-                </div>
-                <div class="podium-base">
-                    <div class="podium-info">
-                        <div class="podium-nome">${escapeHtml(user.nickname)}</div>
-                        <div class="podium-stats">
-                            <div class="podium-pontos">
-                                <i class="fa-solid fa-coins"></i> ${formatNumber(user.points || 0)}
-                            </div>
-                            <div class="podium-label">pontos</div>
-                        </div>
-                    </div>
-                    <div class="podium-rank-number">${actualPos}</div>
-                </div>
-            </div>
-        `;
-    }).join("");
-};
-
-const renderRankingList = () => {
-    const container = document.getElementById("rankingCompleto");
-    if (!container) return;
-
-    if (state.ranking.length === 0) {
-        container.innerHTML = `
-            <div class="empty-state">
-                <i class="fa-solid fa-users" style="font-size: 48px;"></i>
-                <h3>Nenhum caçador ainda</h3>
-                <p>Seja o primeiro a resgatar ovos!</p>
-            </div>
-        `;
-        return;
-    }
-
-    container.innerHTML = state.ranking.map((user, index) => {
-        const position = index + 1;
-        const isMe = state.user && user.id === state.user.id;
-        const isTop3 = position <= 3;
-
-        let posClass = "normal";
-        if (position === 1) posClass = "top-1";
-        else if (position === 2) posClass = "top-2";
-        else if (position === 3) posClass = "top-3";
-
-        const avatarUrl = `https://www.habbo.com.br/habbo-imaging/avatarimage?user=${encodeURIComponent(user.nickname)}&size=m&action=std&direction=2&head_direction=2&gesture=std`;
-        const mainValue = state.rankingMode === "ovos" ? user.eggs_found : user.points;
-        const mainLabel = state.rankingMode === "ovos" ? "ovos" : "pontos";
-        const mainIcon = state.rankingMode === "ovos" ? "fa-egg" : "fa-coins";
-
-        return `
-            <div class="ranking-item ${isMe ? "destaque" : ""}" data-pos="${position}">
-                <div class="ranking-pos ${posClass}">
-                    ${position <= 3 ? (position === 1 ? "🥇" : position === 2 ? "🥈" : "🥉") : position}
-                </div>
-                
-                <div class="ranking-avatar-habbo">
-                    <img src="${avatarUrl}" 
-                         alt="${escapeHtml(user.nickname)}"
-                         onerror="this.parentElement.innerHTML='<div class=\\'ranking-avatar-placeholder\\'>${escapeHtml(user.nickname?.[0] || "?")}</div>'"
-                         loading="lazy">
-                </div>
-                
-                <div class="ranking-info">
-                    <div class="ranking-nome">
-                        ${escapeHtml(user.nickname)}
-                        ${isMe ? "<span class='ranking-badge'>Você</span>" : ""}
-                        ${isTop3 ? "<span style='font-size: 16px;'>🏆</span>" : ""}
-                    </div>
-                    <div class="ranking-stats-row">
-                        <div class="ranking-stat pontos">
-                            <i class="fa-solid fa-coins"></i> ${formatNumber(user.points || 0)} pts
-                        </div>
-                        <div class="ranking-stat ovos">
-                            <i class="fa-solid fa-egg"></i> ${formatNumber(user.eggs_found || 0)} ovos
-                        </div>
-                    </div>
-                </div>
-                
-                <div class="ranking-valor">
-                    <div class="ranking-numero">
-                        <i class="fa-solid ${mainIcon}" style="font-size: 18px; margin-right: 4px;"></i>
-                        ${formatNumber(mainValue || 0)}
-                    </div>
-                    <div class="ranking-label">${mainLabel}</div>
-                </div>
-            </div>
-        `;
-    }).join("");
-};
-
-const renderRanking = () => {
-    renderPodium();
-    renderRankingList();
-};
-
-const renderPrizes = () => {
-    const containers = {
-        comum: $id("premiosComum"),
-        incomum: $id("premiosIncomum"),
-        raro: $id("premiosRaro"),
-        epico: $id("premiosEpico"),
-        lendario: $id("premiosLendario")
-    };
-
-    Object.values(containers).forEach(c => { if(c) c.innerHTML = ""; });
-    
-    const totalPremios = $id("totalPremios");
-    if (totalPremios) totalPremios.textContent = `${state.prizes.length} prêmios`;
-
-    const hasAnyContainer = Object.values(containers).some(c => c !== null);
-    if (!hasAnyContainer) return;
-
-    if (!state.prizes.length) {
-        Object.values(containers).forEach(c => { if(c) c.innerHTML = `<div class="empty-state"><h3>Nenhum prêmio</h3></div>`; });
-        return;
-    }
-
-    state.prizes.forEach(prize => {
-        const rarity = RARITY_CONFIG[prize.rarity] || RARITY_CONFIG.comum;
-        const container = containers[prize.rarity] || containers.comum;
-        if (!container) return;
-        
-        const hasPoints = (state.user?.points || 0) >= prize.cost_points;
-        const hasStock = prize.stock > 0;
-
-        container.innerHTML += `
-            <div class="premio-card ${rarity.className}">
-                <span class="premio-raridade">${rarity.label}</span>
-                <div class="premio-icon">
-                    <img src="${escapeHtml(prize.image_url)}" alt="${escapeHtml(prize.title)}" onerror="this.src='https://via.placeholder.com/80'">
-                </div>
-                <div class="premio-nome">${escapeHtml(prize.title)}</div>
-                <div class="premio-desc">${escapeHtml(prize.description)}</div>
-                <div style="display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-bottom: 12px;">
-                    <span class="premio-origem ovo"><i class="fa-solid fa-coins"></i> ${formatNumber(prize.cost_points)} pts</span>
-                    <span class="premio-origem codigo"><i class="fa-solid fa-box"></i> ${formatNumber(prize.stock)} disp</span>
-                </div>
-                <button class="${hasPoints && hasStock ? "btn btn-primary btn-sm" : "btn btn-secondary btn-sm"}" 
-                    ${hasPoints && hasStock ? `onclick="trocarPremio('${prize.id}')"` : "disabled"}>
-                    ${!hasStock ? "Esgotado" : hasPoints ? "Resgatar" : "Pontos insuficientes"}
-                </button>
-            </div>
-        `;
-    });
-};
-
-const loadRedemptions = async () => {
-    if (!state.user) return;
-    const { data } = await supabaseClient
-        .from("redemptions")
-        .select("*")
-        .eq("user_id", state.user.id)
-        .order("created_at", { ascending: false });
-    state.redemptions = data || [];
-};
-
-const renderRedemptions = () => {
-    const recent = $id("meusUltimosResgates");
-    const full = $id("meuHistoricoCompleto");
-
-    if (!state.redemptions.length) {
-        if (recent) recent.innerHTML = `<div class="empty-state"><div style="font-size: 64px;">🧺</div><h3>Sua cesta está vazia</h3></div>`;
-        if (full) full.innerHTML = `<div class="empty-state"><h3>Nenhum resgate ainda</h3></div>`;
-        return;
-    }
-
-    const buildCard = (item, index) => {
-        const isPrize = !!item.prize_id;
-        const isPending = item.status === "pending";
-        const isApproved = item.status === "approved";
-        const isRejected = item.status === "rejected";
-
-        let icon = isPrize ? "🎁" : "🥚";
-        let title = isPrize ? "Prêmio resgatado" : `Ovo ${isPending ? "pendente" : isApproved ? "aprovado ✓" : "rejeitado ✗"}`;
-        let pointsText = item.points_delta > 0 ? `+${formatNumber(item.points_delta)}` : formatNumber(item.points_delta);
-
-        const highlightClass = (isApproved && !item._viewed) ? 'style="animation: pulse 2s;"' : "";
-
-        return `
-            <div class="resgate-card ${isApproved ? "aprovado" : isPending ? "pendente" : "rejeitado"}" ${highlightClass}>
-                <div class="resgate-emoji">${icon}</div>
-                <div class="resgate-info">
-                    <h4>${title}</h4>
-                    <p>${escapeHtml(item.code || "")} • ${formatDateTime(item.created_at)}</p>
-                    ${isPending ? '<p style="color: var(--warning); font-size: 12px;"><i class="fa-solid fa-clock"></i> Aguardando aprovação</p>' : ""}
-                    ${isRejected && item.rejection_reason ? `<p style="color: var(--danger); font-size: 11px;">Motivo: ${escapeHtml(item.rejection_reason)}</p>` : ""}
-                </div>
-                <div class="resgate-pontos">
-                    <span class="pontos ${isApproved ? "aprovado" : "pendente"}">${pointsText} pts</span>
-                </div>
-            </div>
-        `;
-    };
-
-    if (recent) recent.innerHTML = state.redemptions.slice(0, 3).map((item, i) => buildCard(item, i)).join("");
-    if (full) full.innerHTML = state.redemptions.map((item, i) => buildCard(item, i)).join("");
-
-    state.redemptions.forEach(r => r._viewed = true);
-};
-
-const loadRanking = async () => {
-    const orderBy = state.rankingMode === "ovos" ? "eggs_found" : "points";
-
-    const { data, error } = await supabaseClient
-        .from("users")
-        .select("id, nickname, points, eggs_found")
-        .order(orderBy, { ascending: false })
-        .limit(50);
-
-    if (error) {
-        state.ranking = [];
-        return;
-    }
-
-    state.ranking = data || [];
-};
-
-async function alternarRanking(mode) {
-    state.rankingMode = mode;
-    document.getElementById("btnRankPontos")?.classList.toggle("active", mode === "pontos");
-    document.getElementById("btnRankOvos")?.classList.toggle("active", mode === "ovos");
-    await loadRanking();
-    renderPodium();
-    renderRankingList();
-}
-
-function iniciarResgateCodigo() {
-    if (!state.user) {
-        showToast("error", "Erro", "Escolha um apelido primeiro");
-        return;
-    }
-
-    const code = $id("codigoInput").value.trim().toUpperCase();
-    if (!code) return showToast("error", "Erro", "Digite um código");
-
-    state.currentCode = code;
-    $id("comprovacaoCodigo").textContent = code;
-    $id("comprovacaoLink").value = "";
-    $id("comprovacaoDesc").value = "";
-    $id("linkPreview").style.display = "none";
-    openModal("comprovacaoModal");
-}
-
-async function confirmarComprovacao(event) {
-    event.preventDefault();
-
-    const proofUrl = $id("comprovacaoLink").value.trim();
-    const proofDesc = $id("comprovacaoDesc").value.trim();
-
-    if (!proofUrl || !proofDesc) {
-        showToast("error", "Erro", "Preencha todos os campos");
-        return;
-    }
-
-    fecharComprovacaoModal();
-
-    const { data, error } = await supabaseClient.rpc("redeem_code_with_proof", {
-        p_code: state.currentCode,
-        p_user_id: state.user.id,
-        p_proof_url: proofUrl,
-        p_proof_description: proofDesc
-    });
-
-    if (error) {
-        showToast("error", "Erro", error.message);
-        return;
-    }
-
-    const result = Array.isArray(data) ? data[0] : data;
-
-    if (result.success) {
-        $id("codigoInput").value = "";
-        $id("resultadoTituloModal").textContent = "✅ Enviado para Aprovação";
-        $id("resultadoConteudo").innerHTML = `
-            <div class="resultado-codigo">
-                <span class="resultado-icon">⏳</span>
-                <div class="resultado-titulo">Aguardando Aprovação</div>
-                <div class="resultado-desc">Seu resgate foi enviado e será analisado pela administração.</div>
-                <div class="resultado-detalhes">
-                    <div class="resultado-item"><span>Código:</span> <strong>${escapeHtml(state.currentCode)}</strong></div>
-                    <div class="resultado-item"><span>Pontos:</span> <strong>+${formatNumber(result.points)}</strong></div>
-                    <div class="resultado-item"><span>Status:</span> <strong style="color: var(--warning);">Pendente</strong></div>
-                </div>
-            </div>
-        `;
-        openModal("resultadoModal");
-        showToast("success", "Sucesso", "Resgate enviado para aprovação!");
-        await refreshAll();
-    } else {
-        showToast("error", "Erro", result.message);
-    }
-}
-
-async function trocarPremio(prizeId) {
-    if (!state.user) return showToast("error", "Erro", "Escolha um apelido primeiro");
-
-    const { data, error } = await supabaseClient.rpc("redeem_prize", {
-        p_prize_id: prizeId,
-        p_user_id: state.user.id
-    });
-
-    if (error) {
-        showToast("error", "Erro", error.message);
-        return;
-    }
-
-    const result = Array.isArray(data) ? data[0] : data;
-
-    if (result.success) {
-        state.user.points = result.remaining_points;
-        state.user.prizes_received = (state.user.prizes_received || 0) + 1;
-        await refreshAll();
-        showToast("success", "Sucesso", "Prêmio resgatado!");
-        $id("resultadoTituloModal").textContent = "🎁 Prêmio Resgatado!";
-        $id("resultadoConteudo").innerHTML = `
-            <div class="resultado-codigo">
-                <span class="resultado-icon">🎉</span>
-                <div class="resultado-titulo">Parabéns!</div>
-                <div class="resultado-desc">Você resgatou um prêmio com sucesso.</div>
-                <div class="resultado-detalhes">
-                    <div class="resultado-item"><span>Prêmio:</span> <strong>${escapeHtml(result.message)}</strong></div>
-                    <div class="resultado-item"><span>Pontos gastos:</span> <strong>${formatNumber(result.points_spent)}</strong></div>
-                    <div class="resultado-item"><span>Saldo restante:</span> <strong>${formatNumber(result.remaining_points)}</strong></div>
-                </div>
-            </div>
-        `;
-        openModal("resultadoModal");
-    } else {
-        showToast("error", "Erro", result.message);
-    }
-}
-
-function showAdminTab(tab) {
-    document.querySelectorAll(".admin-tab").forEach(t => t.classList.toggle("active", t.dataset.tab === tab));
-    document.querySelectorAll(".admin-section").forEach(s => s.classList.toggle("active", s.id === `admin-${tab}`));
-}
-
-// ✅ CORREÇÃO: Adicionado p_admin_id em todas as chamadas RPC de admin
-async function loadAdminData() {
-    if (!state.user?.is_admin) return;
-
-    try {
-        const { data: stats, error: statsError } = await supabaseClient.rpc("get_admin_stats", {
-            p_admin_id: state.user.id
-        });
-        
-        if (!statsError && stats && (Array.isArray(stats) ? stats.length > 0 : Object.keys(stats).length > 0)) {
-            const s = Array.isArray(stats) ? stats[0] : stats;
+        // Função do Endpoint do fórum (Ajuste a URL para a API do seu fórum)
+        async function obterNickDoForum() {
+            // --- PARA TESTES MANTENHA A LINHA ABAIXO DESCOMENTADA ---
+            // return "Sliker244"; // Sliker244 tem adminstore="SIM" no seu JSON
+            // return "isabellaju97"; // isabellaju97 é usuária normal
+            // return "Joaozinho"; // Joaozinho será bloqueado pois não está no JSON
+
+            // --- QUANDO FOR PARA PRODUÇÃO, USE ESSE BLOCO: ---
             
-            const statTotalUsers = $id("statTotalUsers");
-            const statTotalCodes = $id("statTotalCodes");
-            const statActiveCodes = $id("statActiveCodes");
-            const statPending = $id("statPending");
+            try {
+                const urlDoForum = 'https://SEU_FORUM.com.br/api_user.php'; 
+                const resposta = await fetch(urlDoForum, { method: 'GET', credentials: 'include' });
+                const dados = await resposta.json();
+                return (dados.logado && dados.nickname) ? dados.nickname : null;
+            } catch (erro) {
+                return null;
+            }
             
-            if (statTotalUsers) statTotalUsers.textContent = formatNumber(s.total_users || 0);
-            if (statTotalCodes) statTotalCodes.textContent = formatNumber(s.total_codes || 0);
-            if (statActiveCodes) statActiveCodes.textContent = formatNumber(s.active_codes || 0);
-            if (statPending) statPending.textContent = formatNumber(s.pending_redemptions || 0);
-        } else {
-            console.warn("Stats retornou vazio, undefined ou erro:", statsError);
-            const statTotalUsers = $id("statTotalUsers");
-            const statTotalCodes = $id("statTotalCodes");
-            const statActiveCodes = $id("statActiveCodes");
-            const statPending = $id("statPending");
-            
-            if (statTotalUsers) statTotalUsers.textContent = "0";
-            if (statTotalCodes) statTotalCodes.textContent = "0";
-            if (statActiveCodes) statActiveCodes.textContent = "0";
-            if (statPending) statPending.textContent = "0";
         }
 
-        const { data: pending } = await supabaseClient.rpc("get_pending_redemptions", {
-            p_admin_id: state.user.id
-        });
-        state.adminData.pending = pending || [];
-        renderPendingRedemptions();
-
-        const { data: codes } = await supabaseClient.rpc("get_all_codes", {
-            p_admin_id: state.user.id
-        });
-        state.adminData.codes = codes || [];
-        renderAdminCodes();
-
-        const { data: prizes } = await supabaseClient.rpc("get_all_prizes", {
-            p_admin_id: state.user.id
-        });
-        state.adminData.prizes = prizes || [];
-        renderAdminPrizes();
-    } catch (err) {
-        console.error("Erro ao carregar dados admin:", err);
-        showToast("error", "Erro", "Erro ao carregar painel administrativo");
-    }
-}
-
-function renderPendingRedemptions() {
-    const container = $id("listaAprovacoes");
-    if (!container) return;
-
-    if (!state.adminData.pending.length) {
-        container.innerHTML = `
-            <div class="empty-state">
-                <i class="fa-solid fa-check-circle" style="font-size: 48px; color: var(--success);"></i>
-                <h3>Nenhum resgate pendente</h3>
-                <p>Todos os resgates foram processados!</p>
-            </div>
-        `;
-        return;
-    }
-
-    container.innerHTML = state.adminData.pending.map(p => `
-        <div class="resgate-card pendente" style="margin-bottom: 12px;">
-            <div class="resgate-emoji">${RARITY_CONFIG[p.egg_type]?.emoji || "🥚"}</div>
-            <div class="resgate-info" style="flex: 2;">
-                <h4>${escapeHtml(p.nickname)}</h4>
-                <p><strong>${escapeHtml(p.code)}</strong> • ${RARITY_CONFIG[p.egg_type]?.label || p.egg_type}</p>
-                <p style="font-size: 11px; color: var(--text-tertiary);">${formatDateTime(p.created_at)}</p>
-                <p style="font-size: 12px; margin-top: 4px;"><i class="fa-solid fa-location-dot"></i> ${escapeHtml(p.proof_description?.substring(0, 50) || "")}...</p>
-            </div>
-            <div style="text-align: center; margin: 0 12px;">
-                <div style="font-size: 20px; font-weight: 800; color: var(--gold-dark);">+${formatNumber(p.points)}</div>
-                <div style="font-size: 11px; color: var(--text-tertiary);">pontos</div>
-            </div>
-            <div class="action-btns" style="flex-direction: column;">
-                <button class="btn-icon view" onclick="viewProof('${p.redemption_id}', '${escapeHtml(p.proof_url)}', '${escapeHtml(p.proof_description)}', '${escapeHtml(p.nickname)}', '${escapeHtml(p.code)}')" title="Ver comprovação">
-                    <i class="fa-solid fa-eye"></i>
-                </button>
-                <button class="btn-icon approve" onclick="aprovarResgate('${p.redemption_id}')" title="Aprovar">
-                    <i class="fa-solid fa-check"></i>
-                </button>
-                <button class="btn-icon reject" onclick="abrirRejeicao('${p.redemption_id}')" title="Rejeitar">
-                    <i class="fa-solid fa-xmark"></i>
-                </button>
-            </div>
-        </div>
-    `).join("");
-}
-
-function viewProof(id, url, desc, user, code) {
-    $id("viewProofContent").innerHTML = `
-        <div style="margin-bottom: 20px;">
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px;">
-                <div style="background: var(--bg-secondary); padding: 12px; border-radius: 8px;">
-                    <div style="font-size: 11px; color: var(--text-tertiary); text-transform: uppercase;">Usuário</div>
-                    <div style="font-weight: 700;">${user}</div>
-                </div>
-                <div style="background: var(--bg-secondary); padding: 12px; border-radius: 8px;">
-                    <div style="font-size: 11px; color: var(--text-tertiary); text-transform: uppercase;">Código</div>
-                    <div style="font-weight: 700; font-family: monospace;">${code}</div>
-                </div>
-            </div>
-            <div style="background: var(--bg-secondary); padding: 12px; border-radius: 8px; margin-bottom: 16px;">
-                <div style="font-size: 11px; color: var(--text-tertiary); text-transform: uppercase; margin-bottom: 4px;">Descrição</div>
-                <div>${escapeHtml(desc)}</div>
-            </div>
-            <div style="background: var(--bg-secondary); padding: 12px; border-radius: 8px;">
-                <div style="font-size: 11px; color: var(--text-tertiary); text-transform: uppercase; margin-bottom: 8px;">Imagem de Comprovação</div>
-                <a href="${escapeHtml(url)}" target="_blank" class="proof-link"><i class="fa-solid fa-external-link-alt"></i> Abrir imagem em nova aba</a>
-                <img src="${escapeHtml(url)}" class="proof-preview" style="margin-top: 8px; display: block;" onclick="window.open('${escapeHtml(url)}', '_blank')">
-            </div>
-        </div>
-        <div style="display: flex; gap: 12px;">
-            <button class="btn btn-success" style="flex: 1;" onclick="aprovarResgate('${id}'); fecharViewProofModal();">
-                <i class="fa-solid fa-check"></i> Aprovar
-            </button>
-            <button class="btn btn-danger" style="flex: 1;" onclick="fecharViewProofModal(); abrirRejeicao('${id}');">
-                <i class="fa-solid fa-xmark"></i> Rejeitar
-            </button>
-        </div>
-    `;
-    openModal("viewProofModal");
-}
-
-async function aprovarResgate(redemptionId) {
-    const { data, error } = await supabaseClient.rpc("approve_redemption", {
-        p_redemption_id: redemptionId,
-        p_admin_id: state.user.id
-    });
-
-    if (error) {
-        showToast("error", "Erro", error.message);
-        return;
-    }
-
-    showToast("success", "Sucesso", "Resgate aprovado!");
-    await loadAdminData();
-}
-
-function abrirRejeicao(redemptionId) {
-    $id("rejectRedemptionId").value = redemptionId;
-    $id("rejectReason").value = "";
-    openModal("rejectModal");
-}
-
-async function confirmarRejeicao(event) {
-    event.preventDefault();
-
-    const redemptionId = $id("rejectRedemptionId").value;
-    const reason = $id("rejectReason").value.trim();
-
-    const { data, error } = await supabaseClient.rpc("reject_redemption", {
-        p_redemption_id: redemptionId,
-        p_admin_id: state.user.id,
-        p_reason: reason
-    });
-
-    if (error) {
-        showToast("error", "Erro", error.message);
-        return;
-    }
-
-    fecharRejectModal();
-    showToast("success", "Sucesso", "Resgate rejeitado");
-    await loadAdminData();
-}
-
-function renderAdminCodes() {
-    const tbody = $id("corpoTabelaCodigos");
-    if (!tbody) return;
-    
-    const filtroTipo = $id("filtroTipoOvo")?.value || "";
-    const filtroStatus = $id("filtroStatusCode")?.value || "";
-
-    let codes = state.adminData.codes;
-    if (filtroTipo) codes = codes.filter(c => c.egg_type === filtroTipo);
-    if (filtroStatus === "active") codes = codes.filter(c => c.active && !c.redeemed_by);
-    if (filtroStatus === "used") codes = codes.filter(c => c.redeemed_by || !c.active);
-
-    tbody.innerHTML = codes.map(c => {
-        const rarity = RARITY_CONFIG[c.egg_type];
-        const foiUsado = c.redeemed_by !== null || c.current_uses > 0;
-        const statusText = foiUsado ? "Usado" : "Não foi usado";
-        const statusClass = foiUsado ? "used" : "active";
-        const statusIcon = foiUsado ? "check" : "circle";
-
-        return `
-            <tr>
-                <td>
-                    <span class="code-badge ${rarity?.className || "comum"}">
-                        <i class="fa-solid fa-key"></i> ${escapeHtml(c.code)}
-                    </span>
-                </td>
-                <td>${rarity?.emoji || "🥚"} ${escapeHtml(c.egg_name)}</td>
-                <td>
-                    <span class="status-pill ${statusClass}">
-                        <i class="fa-solid fa-${statusIcon}"></i>
-                        ${statusText}
-                    </span>
-                </td>
-                <td>
-                    ${c.redeemed_by_nickname ? `<strong>${escapeHtml(c.redeemed_by_nickname)}</strong>` : (foiUsado ? "<em>Processando...</em>" : "-")}
-                </td>
-                <td>
-                    <button class="btn-icon copy" onclick="navigator.clipboard.writeText('${escapeHtml(c.code)}'); showToast('success', 'Copiado', 'Código copiado!')" title="Copiar">
-                        <i class="fa-solid fa-copy"></i>
-                    </button>
-                </td>
-            </tr>
-        `;
-    }).join("");
-}
-
-function filtrarCodigos() {
-    renderAdminCodes();
-}
-
-function renderAdminPrizes() {
-    const tbody = $id("corpoTabelaPremios");
-    if (!tbody) return;
-
-    tbody.innerHTML = state.adminData.prizes.map(p => {
-        const rarity = RARITY_CONFIG[p.rarity];
-
-        return `
-            <tr>
-                <td>
-                    <img src="${escapeHtml(p.image_url)}" class="prize-image-preview" onerror="this.src='https://via.placeholder.com/60'">
-                </td>
-                <td><strong>${escapeHtml(p.title)}</strong></td>
-                <td><span style="color: ${rarity ? `var(--premio-${p.rarity})` : "inherit"}">${rarity?.emoji || "⭐"} ${rarity?.label || p.rarity}</span></td>
-                <td>${formatNumber(p.cost_points)} pts</td>
-                <td>
-                    <div class="stock-control">
-                        <input type="number" class="stock-input" value="${p.stock}" id="stock-${p.id}" min="0">
-                        <button class="btn btn-sm btn-primary" onclick="atualizarEstoque('${p.id}')">
-                            <i class="fa-solid fa-save"></i>
+        function mostrarAcessoNegado(mensagem) {
+            if (document.getElementById("loginModal")) document.getElementById("loginModal").remove();
+            
+            const overlay = document.createElement("div");
+            overlay.id = "loginModal";
+            overlay.className = "modal-overlay active";
+            overlay.innerHTML = `
+                <div class="modal" style="max-width:400px; text-align: center; border-top: 4px solid var(--danger);">
+                    <div class="modal-header" style="justify-content: center; border-bottom: none; padding-top: 24px;">
+                        <h3 class="modal-title" style="color: var(--danger); font-size: 20px;">
+                            <i class="fa-solid fa-lock"></i> Acesso Restrito
+                        </h3>
+                    </div>
+                    <div class="modal-body">
+                        <p style="font-size:14px;color:var(--text-secondary);margin-bottom:24px;">
+                            ${mensagem}
+                        </p>
+                        <button onclick="window.location.reload()" class="btn btn-secondary" style="width:100%; margin-bottom: 8px;">
+                            <i class="fa-solid fa-rotate-right"></i> Tentar Novamente
                         </button>
                     </div>
-                </td>
-                <td>${formatNumber(p.redemptions_count)}</td>
-                <td>
-                    <button class="btn-icon view" onclick="editarPremio('${p.id}')" title="Editar">
-                        <i class="fa-solid fa-pen"></i>
-                    </button>
-                </td>
-            </tr>
-        `;
-    }).join("");
-}
+                </div>`;
+            document.body.appendChild(overlay);
+        }
 
-// ✅ CORREÇÃO: Adicionado p_admin_id na chamada RPC
-async function atualizarEstoque(prizeId) {
-    const newStock = parseInt($id(`stock-${prizeId}`)?.value || 0);
+        // ═══════════════════════════════════════════════════
+        // PERFIL DO USUÁRIO
+        // ═══════════════════════════════════════════════════
+        async function carregarPerfil() {
+            const { data, error } = await db
+                .from("profiles")
+                .select("*")
+                .eq("id", currentUser.id)
+                .single();
 
-    const { data, error } = await supabaseClient.rpc("update_prize_stock", {
-        p_admin_id: state.user.id,
-        p_prize_id: prizeId,
-        p_new_stock: newStock
-    });
+            if (error && error.code === "PGRST116") {
+                // Perfil ainda não existe — pede nickname
+                abrirNicknameModal();
+                return;
+            }
+            if (error) { console.error(error); return; }
 
-    if (error) {
-        showToast("error", "Erro", error.message);
-        return;
-    }
+            currentProfile = data;
+            atualizarUI();
 
-    showToast("success", "Sucesso", "Estoque atualizado");
-    await loadAdminData();
-}
+            // Mostra seção admin se for admin
+            if (currentProfile.role === "admin") {
+                document.getElementById("adminNavSection").style.display = "block";
+                carregarDadosAdmin();
+            }
 
-function editarPremio(prizeId) {
-    const prize = state.adminData.prizes.find(p => p.id === prizeId);
-    if (!prize) return;
+            carregarDados();
+        }
 
-    $id("editPremioId").value = prize.id;
-    $id("editPremioNome").value = prize.title;
-    $id("editPremioImagem").value = prize.image_url;
-    $id("editPremioEstoque").value = prize.stock;
-    $id("editPremioCusto").value = prize.cost_points;
-    $id("editPremioDescricao").value = prize.description || "";
+        async function salvarApelido(event) {
+            event.preventDefault();
+            const nickname = document.getElementById("nicknameInput").value.trim();
+            if (!nickname) return;
 
-    const preview = $id("editPremioPreview");
-    if (preview) {
-        preview.src = prize.image_url;
-        preview.style.display = "block";
-    }
+            // Verifica se o nick Habbo existe na lista de membros
+            // (opcional — remove if check se quiser abrir para não-membros)
+            const { data: membro } = await db
+                .from("habbo_members_cache")
+                .select("habbo_nick, avatar_url")
+                .ilike("habbo_nick", nickname)
+                .single();
 
-    openModal("editPremioModal");
-}
+            const { data, error } = await db.from("profiles").insert({
+                id:          currentUser.id,
+                nickname:    nickname,
+                habbo_user:  membro?.habbo_nick || null,
+            }).select().single();
 
-async function salvarEdicaoPremio(event) {
-    event.preventDefault();
+            if (error) {
+                mostrarToast("Erro", "Não foi possível salvar o apelido.", "error");
+                console.error(error);
+                return;
+            }
 
-    const id = $id("editPremioId")?.value;
-    if (!id) return;
+            currentProfile = data;
+            fecharNicknameModal();
+            atualizarUI();
+            carregarDados();
+        }
 
-    const updates = {
-        title: $id("editPremioNome")?.value,
-        image_url: $id("editPremioImagem")?.value,
-        stock: parseInt($id("editPremioEstoque")?.value || 0),
-        cost_points: parseInt($id("editPremioCusto")?.value || 0),
-        description: $id("editPremioDescricao")?.value
-    };
+        function abrirNicknameModal() {
+            document.getElementById("nicknameModal").classList.add("active");
+        }
+        function fecharNicknameModal() {
+            document.getElementById("nicknameModal").classList.remove("active");
+        }
 
-    const { error } = await supabaseClient
-        .from("prizes")
-        .update(updates)
-        .eq("id", id);
+        // ═══════════════════════════════════════════════════
+        // ATUALIZAÇÃO DA UI
+        // ═══════════════════════════════════════════════════
+        function atualizarUI() {
+            if (!currentProfile) return;
+            const pts = currentProfile.points || 0;
 
-    if (error) {
-        showToast("error", "Erro", error.message);
-        return;
-    }
+            // Header
+            document.getElementById("userDisplayName").textContent = currentProfile.nickname;
+            document.getElementById("userDisplayRole").textContent =
+                currentProfile.role === "admin" ? "🛡️ Administrador" : "🥚 Caçador";
+            document.getElementById("userBadge").style.display = "flex";
 
-    fecharEditPremioModal();
-    showToast("success", "Sucesso", "Prêmio atualizado");
-    await loadAdminData();
-    await loadPrizes();
-    renderPrizes();
-}
+            // Avatar Habbo
+            if (currentProfile.habbo_user) {
+                const avatarUrl = `https://www.habbo.com.br/habbo-imaging/avatarimage?user=${encodeURIComponent(currentProfile.habbo_user)}&action=std&size=l`;
+                const avatarEl  = document.getElementById("userAvatar");
+                avatarEl.innerHTML = `<img src="${avatarUrl}" style="width:100%;height:100%;object-fit:cover;" onerror="this.parentElement.textContent='🐰'">`;
+            }
 
-// ✅ CORREÇÃO: Adicionado p_admin_id na chamada RPC
-async function gerarCodigos(event) {
-    event.preventDefault();
+            // Stats
+            document.getElementById("userPoints").textContent        = pts;
+            document.getElementById("saldoPontosLoja").textContent  = pts;
+            document.getElementById("meusPontosTotal").textContent  = pts;
 
-    const tipo = $id("codigoTipo")?.value;
-    const qtd = parseInt($id("codigoQuantidade")?.value || 0);
-    const local = $id("codigoLocal")?.value;
+            // Mobile
+            document.getElementById("mobileUserName").textContent = currentProfile.nickname;
+            document.getElementById("mobileUserRole").textContent =
+                currentProfile.role === "admin" ? "Administrador" : "Caçador";
+            document.getElementById("mobileProfile").style.display = "block";
+        }
 
-    if (!tipo || !qtd) return showToast("error", "Erro", "Preencha todos os campos");
+        // ═══════════════════════════════════════════════════
+        // CARREGAMENTO PRINCIPAL DE DADOS
+        // ═══════════════════════════════════════════════════
+        async function carregarDados() {
+            await Promise.all([
+                carregarMeusResgates(),
+                carregarPremios(),
+                carregarRanking(),
+            ]);
+        }
 
-    let generated = [];
+        // ═══════════════════════════════════════════════════
+        // GUIA DOS OVOS (estático)
+        // ═══════════════════════════════════════════════════
+        function renderGuiaOvos() {
+            const lista = document.getElementById("guiaOvosLista");
+            lista.innerHTML = Object.entries(TIPOS_OVO).map(([tipo, info]) => `
+                <div class="guia-item ${info.classe}">
+                    <div class="guia-header">
+                        <div class="guia-emoji">${info.emoji}</div>
+                        <div class="guia-titulo">
+                            <div class="guia-nome ${tipo === 'coelhao' ? '' : ''}" style="${tipo !== 'coelhao' ? `color:var(--ovo-${tipo})` : ''}">${info.nome}</div>
+                            <div class="guia-quantidade">${info.maxUsos}</div>
+                        </div>
+                    </div>
+                    <div class="guia-recompensa">
+                        <span class="guia-pontos">⭐ ${info.pontos} pontos</span>
+                    </div>
+                    <div class="guia-desc">${info.desc}</div>
+                    <div class="guia-limites"><i class="fa-solid fa-circle-info"></i> Máximo de usos: ${info.maxUsos}</div>
+                </div>
+            `).join("");
+        }
 
-    for (let i = 0; i < qtd; i++) {
-        const { data } = await supabaseClient.rpc("create_egg_code", {
-            p_admin_id: state.user.id,
-            p_egg_type: tipo,
-            p_location_hint: local || null
+        // ═══════════════════════════════════════════════════
+        // RESGATAR CÓDIGO — fluxo de 2 passos
+        // Passo 1: verificar (RPC server-side)
+        // Passo 2: enviar comprovação (INSERT em egg_redemptions)
+        // ═══════════════════════════════════════════════════
+        async function iniciarResgateCodigo() {
+            const codigo = document.getElementById("codigoInput").value.trim().toUpperCase();
+            if (!codigo) { mostrarToast("Atenção", "Digite um código.", "error"); return; }
+            if (!currentProfile) { mostrarToast("Atenção", "Faça login primeiro.", "error"); return; }
+
+            // Chama RPC server-side — não expõe lógica de negócio ao cliente
+            const { data, error } = await db.rpc("verify_egg_code", { p_code: codigo });
+
+            if (error) {
+                mostrarToast("Erro", error.message, "error");
+                return;
+            }
+            if (!data.ok) {
+                mostrarToast("Código inválido", data.error, "error");
+                return;
+            }
+
+            // Guarda o id do código para usar no passo 2
+            pendingCodeId = data.code_id;
+
+            // Abre modal de comprovação
+            document.getElementById("comprovacaoCodigo").textContent = codigo;
+            document.getElementById("comprovacaoInfo").innerHTML = `
+                <div style="display:flex;align-items:center;gap:12px;">
+                    <span style="font-size:32px;">${TIPOS_OVO[data.type]?.emoji || "🥚"}</span>
+                    <div>
+                        <strong>${TIPOS_OVO[data.type]?.nome || data.type}</strong><br>
+                        <span style="color:var(--gold-dark);font-weight:700;">+${data.points} pontos (após aprovação)</span>
+                    </div>
+                </div>`;
+            document.getElementById("comprovacaoModal").classList.add("active");
+        }
+
+        async function confirmarComprovacao(event) {
+            event.preventDefault();
+            if (!pendingCodeId) return;
+
+            const proofUrl = document.getElementById("comprovacaoLink").value.trim();
+            const desc     = document.getElementById("comprovacaoDesc").value.trim();
+
+            // Validação básica de URL
+            if (!proofUrl.match(/^https?:\/\/.+\.(png|jpg|jpeg|gif|webp)(\?.*)?$/i)) {
+                mostrarToast("URL inválida", "O link deve apontar para uma imagem (png, jpg, gif...).", "error");
+                return;
+            }
+
+            const { error } = await db.from("egg_redemptions").insert({
+                user_id:     currentProfile.id,
+                code_id:     pendingCodeId,
+                proof_url:   proofUrl,
+                description: desc,
+                // status fica 'pendente' por default — o admin aprova
+            });
+
+            if (error) {
+                mostrarToast("Erro", error.message || "Não foi possível enviar a comprovação.", "error");
+                return;
+            }
+
+            fecharComprovacaoModal();
+            pendingCodeId = null;
+            document.getElementById("codigoInput").value = "";
+            mostrarToast("Enviado!", "Comprovação enviada para aprovação. Aguarde o admin revisar.", "success");
+            carregarMeusResgates();
+        }
+
+        function fecharComprovacaoModal() {
+            document.getElementById("comprovacaoModal").classList.remove("active");
+            document.getElementById("formComprovacao").reset();
+            document.getElementById("linkPreview").style.display = "none";
+        }
+
+        // Preview de imagem no modal de comprovação
+        document.addEventListener("DOMContentLoaded", () => {
+            document.getElementById("comprovacaoLink")?.addEventListener("input", function () {
+                const url = this.value.trim();
+                const preview = document.getElementById("linkPreview");
+                const img     = document.getElementById("previewImageLink");
+                if (url.match(/^https?:\/\/.+\.(png|jpg|jpeg|gif|webp)/i)) {
+                    img.src = url;
+                    preview.style.display = "block";
+                } else {
+                    preview.style.display = "none";
+                }
+            });
         });
 
-        if (data && Array.isArray(data)) {
-            generated.push(data[0]);
+        // ═══════════════════════════════════════════════════
+        // MEUS RESGATES
+        // ═══════════════════════════════════════════════════
+        async function carregarMeusResgates() {
+            if (!currentProfile) return;
+
+            const { data: resgates, error } = await db
+                .from("egg_redemptions")
+                .select(`
+                    id, status, points_awarded, reject_reason, created_at,
+                    egg_codes ( type, points )
+                `)
+                .eq("user_id", currentProfile.id)
+                .order("created_at", { ascending: false });
+
+            if (error) { console.error(error); return; }
+
+            const totalOvos    = resgates?.filter(r => r.status === "aprovado").length || 0;
+            const totalPremios = 0; // será contado abaixo
+
+            document.getElementById("userTotalOvos").textContent  = totalOvos;
+            document.getElementById("meusOvosTotal").textContent  = totalOvos;
+
+            const renderResgate = (r) => {
+                const tipo    = r.egg_codes?.type || "comum";
+                const info    = TIPOS_OVO[tipo] || TIPOS_OVO.comum;
+                const statusLabel = { aprovado: "Aprovado", pendente: "Pendente", rejeitado: "Rejeitado" }[r.status];
+                return `
+                    <div class="resgate-card ${r.status}">
+                        <div class="resgate-emoji">${info.emoji}</div>
+                        <div class="resgate-info">
+                            <h4>${info.nome}</h4>
+                            <p>${new Date(r.created_at).toLocaleDateString("pt-BR")}</p>
+                            <span class="resgate-status ${r.status}">${statusLabel}</span>
+                            ${r.reject_reason ? `<p style="color:var(--danger);font-size:11px;margin-top:4px;">❌ ${r.reject_reason}</p>` : ""}
+                        </div>
+                        <div class="resgate-pontos">
+                            <div class="pontos ${r.status}">
+                                ${r.status === "aprovado" ? `+${r.points_awarded}` : r.status === "pendente" ? "?" : "—"}
+                            </div>
+                            <div style="font-size:10px;color:var(--text-tertiary);">pts</div>
+                        </div>
+                    </div>`;
+            };
+
+            const html = resgates?.length
+                ? resgates.map(renderResgate).join("")
+                : `<div class="empty-state"><div style="font-size:48px;">🧺</div><h3>Nenhum resgate ainda</h3><p>Encontre ovos e resgate os códigos!</p></div>`;
+
+            document.getElementById("meuHistoricoCompleto").innerHTML = html;
+            // Mostra apenas os 3 mais recentes na aba "Resgatar"
+            const ultimos = resgates?.slice(0, 3);
+            document.getElementById("meusUltimosResgates").innerHTML = ultimos?.length
+                ? ultimos.map(renderResgate).join("")
+                : `<div class="empty-state"><div style="font-size:48px;">🧺</div><h3>Sua cesta está vazia</h3><p>Encontre ovos para preenchê-la!</p></div>`;
         }
-    }
 
-    const successCount = generated.filter(g => g.success).length;
+        // ═══════════════════════════════════════════════════
+        // PRÊMIOS
+        // ═══════════════════════════════════════════════════
+        async function carregarPremios() {
+            const { data: premios, error } = await db
+                .from("prizes")
+                .select("*")
+                .eq("active", true)
+                .order("cost_points");
 
-    if (successCount > 0) {
-        fecharCodigoModal();
-        $id("resultadoTituloModal").textContent = "🔑 Códigos Gerados";
-        $id("resultadoConteudo").innerHTML = `
-            <div class="resultado-codigo">
-                <span class="resultado-icon">🎉</span>
-                <div class="resultado-titulo">${successCount} código(s) gerado(s)</div>
-                <div class="resultado-desc">Códigos ${RARITY_CONFIG[tipo]?.label || tipo} criados com sucesso!</div>
-                <div class="resultado-detalhes" style="max-height: 300px; overflow-y: auto;">
-                    ${generated.filter(g => g.success).map(g => `
-                        <div class="resultado-item" style="font-family: monospace;">
-                            <span>${escapeHtml(g.code)}</span>
-                            <button class="btn-icon copy" onclick="navigator.clipboard.writeText('${escapeHtml(g.code)}')">
-                                <i class="fa-solid fa-copy"></i>
+            if (error) { console.error(error); return; }
+
+            const total = premios?.length || 0;
+            document.getElementById("totalPremios").textContent = `${total} prêmio${total !== 1 ? "s" : ""}`;
+
+            const categorias = ["comum", "incomum", "raro", "epico", "lendario"];
+            categorias.forEach(cat => {
+                const lista = premios?.filter(p => p.category === cat) || [];
+                document.getElementById(`premios${cat.charAt(0).toUpperCase() + cat.slice(1)}`).innerHTML =
+                    lista.length
+                        ? lista.map(renderPremioCard).join("")
+                        : `<p style="color:var(--text-tertiary);font-size:13px;">Nenhum prêmio nesta categoria.</p>`;
+            });
+        }
+
+        function renderPremioCard(p) {
+            const userPts  = currentProfile?.points || 0;
+            const podePagar = userPts >= p.cost_points;
+            const semEstoque = p.stock <= 0;
+            return `
+                <div class="premio-card ${p.category}">
+                    <span class="premio-raridade">${p.category.toUpperCase()}</span>
+                    <div class="premio-icon">
+                        <img src="${escapeHtml(p.image_url)}" alt="${escapeHtml(p.name)}" onerror="this.src=''">
+                    </div>
+                    <div class="premio-nome">${escapeHtml(p.name)}</div>
+                    <div class="premio-desc">${escapeHtml(p.description || "")}</div>
+                    <div style="text-align:center;margin-bottom:12px;">
+                        <span style="font-size:18px;font-weight:800;color:var(--gold-dark);">⭐ ${p.cost_points}</span>
+                        <span style="font-size:11px;color:var(--text-tertiary);"> pts</span>
+                    </div>
+                    <div style="text-align:center;margin-bottom:12px;">
+                        <span style="font-size:12px;color:${semEstoque ? 'var(--danger)' : 'var(--success)'};">
+                            ${semEstoque ? "❌ Sem estoque" : `✅ ${p.stock} em estoque`}
+                        </span>
+                    </div>
+                    <button class="btn ${!podePagar || semEstoque ? 'btn-secondary' : 'btn-primary'} btn-sm"
+                        style="width:100%;"
+                        ${!podePagar || semEstoque ? "disabled" : ""}
+                        onclick="resgatar_premio('${p.id}', '${escapeHtml(p.name)}', ${p.cost_points})">
+                        ${semEstoque ? "Esgotado" : !podePagar ? `Faltam ${p.cost_points - userPts} pts` : "Resgatar"}
+                    </button>
+                </div>`;
+        }
+
+        async function resgatar_premio(prizeId, nomePremio, custo) {
+            if (!currentProfile) return;
+            if (currentProfile.points < custo) {
+                mostrarToast("Pontos insuficientes", `Você precisa de ${custo} pts.`, "error");
+                return;
+            }
+            if (!confirm(`Confirma resgatar "${nomePremio}" por ${custo} pontos?`)) return;
+
+            // INSERT dispara o trigger handle_prize_redemption que valida e debita pontos
+            const { error } = await db.from("prize_redemptions").insert({
+                user_id:  currentProfile.id,
+                prize_id: prizeId,
+                points_spent: custo, // o trigger valida este valor server-side
+            });
+
+            if (error) {
+                mostrarToast("Erro", error.message, "error");
+                return;
+            }
+
+            mostrarToast("Resgatado!", `"${nomePremio}" resgatado com sucesso!`, "success");
+
+            // Recarrega perfil para atualizar pontos
+            await carregarPerfil();
+            carregarPremios();
+        }
+
+        // ═══════════════════════════════════════════════════
+        // RANKING
+        // ═══════════════════════════════════════════════════
+        async function carregarRanking() {
+            const { data, error } = await db
+                .from("ranking_view")
+                .select("*")
+                .limit(50);
+
+            if (error) { console.error(error); return; }
+
+            const sorted = rankingMode === "ovos"
+                ? [...(data || [])].sort((a, b) => b.total_ovos - a.total_ovos)
+                : data || [];
+
+            renderPodium(sorted.slice(0, 3));
+            renderRankingLista(sorted);
+        }
+
+        function alternarRanking(modo) {
+            rankingMode = modo;
+            document.getElementById("btnRankPontos").classList.toggle("active", modo === "pontos");
+            document.getElementById("btnRankOvos").classList.toggle("active",   modo === "ovos");
+            carregarRanking();
+        }
+
+        function renderPodium(top3) {
+            const posOrder = [1, 0, 2]; // posição visual: 2º, 1º, 3º
+            const medals   = ["🥇", "🥈", "🥉"];
+            const posClass = ["pos-2", "pos-1", "pos-3"];
+            const container = document.getElementById("podiumTop3");
+
+            if (!top3.length) {
+                container.innerHTML = `<div style="text-align:center;color:var(--text-tertiary);">Nenhum caçador ainda</div>`;
+                return;
+            }
+
+            container.innerHTML = posOrder.map((idx, visual) => {
+                const user = top3[idx];
+                if (!user) return "";
+                const avatarUrl = user.habbo_user
+                    ? `https://www.habbo.com.br/habbo-imaging/avatarimage?user=${encodeURIComponent(user.habbo_user)}&action=std&size=l`
+                    : null;
+
+                return `
+                    <div class="podium-item ${posClass[visual]}">
+                        <div class="podium-avatar-wrapper">
+                            <div class="podium-badge">${medals[idx]}</div>
+                            <div class="podium-avatar-container">
+                                ${avatarUrl
+                                    ? `<img src="${avatarUrl}" alt="${escapeHtml(user.nickname)}" onerror="this.parentElement.innerHTML='<div class=podium-avatar-placeholder>${user.nickname.charAt(0).toUpperCase()}</div>'">`
+                                    : `<div class="podium-avatar-placeholder">${user.nickname.charAt(0).toUpperCase()}</div>`}
+                            </div>
+                        </div>
+                        <div class="podium-base">
+                            <div class="podium-info">
+                                <div class="podium-nome">${escapeHtml(user.nickname)}</div>
+                                <div class="podium-stats">
+                                    <div class="podium-pontos">⭐ ${user.points}</div>
+                                    <div class="podium-label">PONTOS</div>
+                                </div>
+                            </div>
+                            <div class="podium-rank-number">${idx + 1}</div>
+                        </div>
+                    </div>`;
+            }).join("");
+        }
+
+        function renderRankingLista(users) {
+            const container = document.getElementById("rankingCompleto");
+            if (!users.length) {
+                container.innerHTML = `<div class="empty-state"><div style="font-size:48px;">🏆</div><h3>Sem dados ainda</h3></div>`;
+                return;
+            }
+
+            container.innerHTML = users.map((u, i) => {
+                const pos = i + 1;
+                const posClass = pos === 1 ? "top-1" : pos === 2 ? "top-2" : pos === 3 ? "top-3" : "normal";
+                const isMe     = u.id === currentProfile?.id;
+                const avatarUrl = u.habbo_user
+                    ? `https://www.habbo.com.br/habbo-imaging/avatarimage?user=${encodeURIComponent(u.habbo_user)}&action=std&size=l`
+                    : null;
+
+                return `
+                    <div class="ranking-item ${isMe ? "destaque" : ""}" data-pos="${pos}"
+                         style="animation-delay:${i * 0.05}s">
+                        <div class="ranking-pos ${posClass}">
+                            ${pos <= 3 ? ["🥇","🥈","🥉"][pos-1] : pos}
+                        </div>
+                        <div class="ranking-avatar-habbo">
+                            ${avatarUrl
+                                ? `<img src="${avatarUrl}" alt="${escapeHtml(u.nickname)}" onerror="this.parentElement.innerHTML='<div class=ranking-avatar-placeholder>${u.nickname.charAt(0).toUpperCase()}</div>'">`
+                                : `<div class="ranking-avatar-placeholder">${u.nickname.charAt(0).toUpperCase()}</div>`}
+                        </div>
+                        <div class="ranking-info">
+                            <div class="ranking-nome">
+                                ${escapeHtml(u.nickname)}
+                                ${isMe ? '<span class="ranking-badge">Você</span>' : ""}
+                            </div>
+                            <div class="ranking-stats-row">
+                                <span class="ranking-stat pontos"><i class="fa-solid fa-coins"></i> ${u.points} pts</span>
+                                <span class="ranking-stat ovos"><i class="fa-solid fa-egg"></i> ${u.total_ovos} ovos</span>
+                            </div>
+                        </div>
+                        <div class="ranking-valor">
+                            <div class="ranking-numero">${rankingMode === "ovos" ? u.total_ovos : u.points}</div>
+                            <div class="ranking-label">${rankingMode === "ovos" ? "ovos" : "pontos"}</div>
+                        </div>
+                    </div>`;
+            }).join("");
+        }
+
+        function setupRealtimeRanking() {
+            db.channel("ranking-updates")
+                .on("postgres_changes",
+                    { event: "*", schema: "public", table: "profiles" },
+                    () => carregarRanking()
+                )
+                .subscribe();
+        }
+
+        // ═══════════════════════════════════════════════════
+        // ADMIN — só executado se role = 'admin'
+        // ═══════════════════════════════════════════════════
+        async function carregarDadosAdmin() {
+            if (currentProfile?.role !== "admin") return;
+
+            const [
+                { count: totalUsers },
+                { count: totalCodes },
+                { count: activeCodes },
+                { count: pending },
+            ] = await Promise.all([
+                db.from("profiles").select("*", { count: "exact", head: true }),
+                db.from("egg_codes").select("*", { count: "exact", head: true }),
+                db.from("egg_codes").select("*", { count: "exact", head: true }).lt("uses_count", db.raw("max_uses")),
+                db.from("egg_redemptions").select("*", { count: "exact", head: true }).eq("status", "pendente"),
+            ]);
+
+            document.getElementById("statTotalUsers").textContent = totalUsers || 0;
+            document.getElementById("statTotalCodes").textContent = totalCodes || 0;
+            document.getElementById("statActiveCodes").textContent = activeCodes || 0;
+            document.getElementById("statPending").textContent     = pending || 0;
+
+            carregarAprovacoes();
+            carregarCodigos();
+            carregarPremiosAdmin();
+        }
+
+        async function carregarAprovacoes() {
+            const { data, error } = await db
+                .from("egg_redemptions")
+                .select(`
+                    id, proof_url, description, status, created_at,
+                    users:profiles ( nickname, habbo_user ),
+                    egg_codes ( code, type, points )
+                `)
+                .eq("status", "pendente")
+                .order("created_at");
+
+            if (error) { console.error(error); return; }
+
+            if (!data?.length) {
+                document.getElementById("listaAprovacoes").innerHTML =
+                    `<div class="empty-state"><i class="fa-solid fa-check-circle" style="font-size:48px;color:var(--success);"></i><h3>Nenhum resgate pendente</h3></div>`;
+                return;
+            }
+
+            document.getElementById("listaAprovacoes").innerHTML = data.map(r => {
+                const tipo = r.egg_codes?.type || "comum";
+                // Lidar com o JOIN de users:profiles
+                const nickname = r.users ? r.users.nickname : "?"; 
+                return `
+                    <div class="resgate-card pendente" style="margin-bottom:12px;">
+                        <div class="resgate-emoji">${TIPOS_OVO[tipo]?.emoji || "🥚"}</div>
+                        <div class="resgate-info" style="flex:1;">
+                            <h4>${escapeHtml(nickname)} — ${TIPOS_OVO[tipo]?.nome || tipo}</h4>
+                            <p>Código: <strong>${escapeHtml(r.egg_codes?.code || "?")}</strong> · +${r.egg_codes?.points} pts</p>
+                            <p style="font-size:11px;color:var(--text-tertiary);">${new Date(r.created_at).toLocaleString("pt-BR")}</p>
+                        </div>
+                        <div class="action-btns">
+                            <button class="btn-icon view" title="Ver comprovação" onclick="verComprovacao('${r.id}','${escapeHtml(r.proof_url)}','${escapeHtml(r.description)}')">
+                                <i class="fa-solid fa-eye"></i>
+                            </button>
+                            <button class="btn-icon approve" title="Aprovar" onclick="aprovarResgate('${r.id}')">
+                                <i class="fa-solid fa-check"></i>
+                            </button>
+                            <button class="btn-icon reject" title="Rejeitar" onclick="abrirRejectModal('${r.id}')">
+                                <i class="fa-solid fa-xmark"></i>
                             </button>
                         </div>
-                    `).join("")}
+                    </div>`;
+            }).join("");
+        }
+
+        async function aprovarResgate(redemptionId) {
+            if (!confirm("Confirmar aprovação deste resgate?")) return;
+
+            // Update de status — o trigger handle_egg_redemption_approval faz o resto
+            const { error } = await db
+                .from("egg_redemptions")
+                .update({ status: "aprovado", reviewed_by: currentProfile.id })
+                .eq("id", redemptionId)
+                .eq("status", "pendente"); // garante que não aprova algo já processado
+
+            if (error) { mostrarToast("Erro", error.message, "error"); return; }
+
+            mostrarToast("Aprovado!", "Resgate aprovado e pontos creditados.", "success");
+            carregarAprovacoes();
+            carregarDadosAdmin();
+        }
+
+        async function confirmarRejeicao(event) {
+            event.preventDefault();
+            const id     = document.getElementById("rejectRedemptionId").value;
+            const reason = document.getElementById("rejectReason").value.trim();
+
+            const { error } = await db
+                .from("egg_redemptions")
+                .update({ status: "rejeitado", reject_reason: reason, reviewed_by: currentProfile.id })
+                .eq("id", id)
+                .eq("status", "pendente");
+
+            if (error) { mostrarToast("Erro", error.message, "error"); return; }
+
+            fecharRejectModal();
+            mostrarToast("Rejeitado", "Resgate rejeitado.", "success");
+            carregarAprovacoes();
+        }
+
+        function abrirRejectModal(id) {
+            document.getElementById("rejectRedemptionId").value = id;
+            document.getElementById("rejectModal").classList.add("active");
+        }
+        function fecharRejectModal() {
+            document.getElementById("rejectModal").classList.remove("active");
+            document.getElementById("formRejeicao").reset();
+        }
+
+        function verComprovacao(id, proofUrl, desc) {
+            document.getElementById("viewProofContent").innerHTML = `
+                <div style="margin-bottom:16px;">
+                    <img src="${escapeHtml(proofUrl)}" style="max-width:100%;border-radius:8px;border:1px solid var(--border);" alt="Comprovação">
                 </div>
-            </div>
-        `;
-        openModal("resultadoModal");
-        showToast("success", "Sucesso", `${successCount} códigos gerados!`);
-        await loadAdminData();
-    } else {
-        showToast("error", "Erro", generated[0]?.message || "Erro ao gerar códigos");
-    }
-}
+                <p><strong>Descrição:</strong><br>${escapeHtml(desc)}</p>
+                <div style="display:flex;gap:12px;margin-top:16px;">
+                    <button class="btn btn-success" style="flex:1;" onclick="aprovarResgate('${id}');fecharViewProofModal();">
+                        <i class="fa-solid fa-check"></i> Aprovar
+                    </button>
+                    <button class="btn btn-danger" style="flex:1;" onclick="fecharViewProofModal();abrirRejectModal('${id}')">
+                        <i class="fa-solid fa-xmark"></i> Rejeitar
+                    </button>
+                </div>`;
+            document.getElementById("viewProofModal").classList.add("active");
+        }
+        function fecharViewProofModal() {
+            document.getElementById("viewProofModal").classList.remove("active");
+        }
 
-async function salvarPremio(event) {
-    event.preventDefault();
+        // ADMIN — Gerar Códigos
+        function abrirCodigoModal() { document.getElementById("codigoModal").classList.add("active"); }
+        function fecharCodigoModal() {
+            document.getElementById("codigoModal").classList.remove("active");
+            document.getElementById("formCodigo").reset();
+        }
 
-    const prize = {
-        title: $id("premioNome")?.value,
-        rarity: $id("premioCategoria")?.value,
-        cost_points: parseInt($id("premioCusto")?.value || 0),
-        image_url: $id("premioImagem")?.value,
-        stock: parseInt($id("premioEstoque")?.value || 0),
-        total_stock: parseInt($id("premioEstoque")?.value || 0),
-        description: $id("premioDescricao")?.value,
-        active: true
-    };
+        async function gerarCodigos(event) {
+            event.preventDefault();
+            if (currentProfile?.role !== "admin") return;
 
-    const { error } = await supabaseClient
-        .from("prizes")
-        .insert(prize);
+            const tipo        = document.getElementById("codigoTipo").value;
+            const quantidade  = parseInt(document.getElementById("codigoQuantidade").value);
+            const localHint   = document.getElementById("codigoLocal").value.trim();
+            const tipoInfo    = TIPOS_OVO[tipo];
 
-    if (error) {
-        showToast("error", "Erro", error.message);
-        return;
-    }
+            const novos = Array.from({ length: quantidade }, () => ({
+                code:          gerarCodigoAleatorio(tipo),
+                type:          tipo,
+                points:        tipoInfo.pontos,
+                max_uses:      ["comum"].includes(tipo) ? 9999 : ["incomum"].includes(tipo) ? 10 : ["raro"].includes(tipo) ? 5 : 1,
+                location_hint: localHint || null,
+                created_by:    currentProfile.id,
+            }));
 
-    fecharPremioModal();
-    showToast("success", "Sucesso", "Prêmio adicionado");
-    await loadAdminData();
-    await loadPrizes();
-    renderPrizes();
-}
+            const { data, error } = await db.from("egg_codes").insert(novos).select();
+            if (error) { mostrarToast("Erro", error.message, "error"); return; }
 
-async function refreshAll() {
-    if (!state.user) return;
-    await Promise.all([
-        loadEggTypes(),
-        loadPrizes(),
-        loadRedemptions(),
-        loadRanking()
-    ]);
-    updateUserUI();
-    renderEggTypes();
-    renderPrizes();
-    renderRedemptions();
-    renderRanking();
-}
+            fecharCodigoModal();
+            mostrarToast("Criado!", `${quantidade} código(s) gerado(s) com sucesso.`, "success");
+            carregarCodigos();
+        }
 
-document.addEventListener("DOMContentLoaded", async () => {
-    if (!ensureSupabase()) return;
-    
-    await hydrateUser();
-    
-    if (!state.user) {
-        console.log("Aguardando autenticação do fórum...");
-    }
-});
+        function gerarCodigoAleatorio(tipo) {
+            const prefix  = { comum: "SRC-C", incomum: "SRC-I", raro: "SRC-R", epico: "SRC-E", lendario: "SRC-L", coelhao: "SRC-X" }[tipo] || "SRC-O";
+            const chars   = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+            const part    = Array.from({ length: 8 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+            return `${prefix}-${part}`;
+        }
+
+        async function carregarCodigos() {
+            const tipoFiltro   = document.getElementById("filtroTipoOvo")?.value || "";
+            const statusFiltro = document.getElementById("filtroStatusCode")?.value || "";
+
+            let query = db.from("egg_codes")
+                .select("*, users:profiles!created_by(nickname)")
+                .order("created_at", { ascending: false });
+
+            if (tipoFiltro)    query = query.eq("type", tipoFiltro);
+            if (statusFiltro === "active") query = query.filter("uses_count", "lt", "max_uses");
+            if (statusFiltro === "used")   query = query.filter("uses_count", "gte", "max_uses");
+
+            const { data, error } = await query;
+            if (error) { console.error(error); return; }
+
+            document.getElementById("corpoTabelaCodigos").innerHTML = (data || []).map(c => {
+                const esgotado = c.uses_count >= c.max_uses;
+                const nickname = c.users ? c.users.nickname : "—";
+                return `
+                    <tr>
+                        <td><span class="code-badge ${c.type}">${escapeHtml(c.code)}</span></td>
+                        <td>${TIPOS_OVO[c.type]?.emoji || ""} ${c.type}</td>
+                        <td><span class="status-pill ${esgotado ? 'used' : 'active'}">${esgotado ? "Esgotado" : "Ativo"} (${c.uses_count}/${c.max_uses})</span></td>
+                        <td>${escapeHtml(nickname)}</td>
+                        <td>
+                            <div class="action-btns">
+                                <button class="btn-icon copy" title="Copiar código" onclick="navigator.clipboard.writeText('${c.code}').then(()=>mostrarToast('Copiado!','','success'))">
+                                    <i class="fa-solid fa-copy"></i>
+                                </button>
+                            </div>
+                        </td>
+                    </tr>`;
+            }).join("");
+        }
+
+        function filtrarCodigos() { carregarCodigos(); }
+
+        // ADMIN — Prêmios
+        function abrirPremioModal() { document.getElementById("premioModal").classList.add("active"); }
+        function fecharPremioModal() {
+            document.getElementById("premioModal").classList.remove("active");
+            document.getElementById("formPremio").reset();
+        }
+
+        document.getElementById("premioImagem")?.addEventListener("input", function () {
+            const url = this.value.trim();
+            const preview = document.getElementById("premioPreview");
+            const text    = document.getElementById("premioPreviewText");
+            if (url.startsWith("https://i.imgur.com/")) {
+                preview.src = url; preview.style.display = "block";
+                text.style.display = "none";
+            } else {
+                preview.style.display = "none"; text.style.display = "block";
+            }
+        });
+
+        async function salvarPremio(event) {
+            event.preventDefault();
+            if (currentProfile?.role !== "admin") return;
+
+            const imageUrl = document.getElementById("premioImagem").value.trim();
+            if (!imageUrl.startsWith("https://i.imgur.com/")) {
+                mostrarToast("URL inválida", "Use apenas links do Imgur (https://i.imgur.com/...).", "error");
+                return;
+            }
+
+            const { error } = await db.from("prizes").insert({
+                name:        document.getElementById("premioNome").value.trim(),
+                category:    document.getElementById("premioCategoria").value,
+                cost_points: parseInt(document.getElementById("premioCusto").value),
+                image_url:   imageUrl,
+                stock:       parseInt(document.getElementById("premioEstoque").value),
+                description: document.getElementById("premioDescricao").value.trim(),
+            });
+
+            if (error) { mostrarToast("Erro", error.message, "error"); return; }
+
+            fecharPremioModal();
+            mostrarToast("Salvo!", "Prêmio adicionado.", "success");
+            carregarPremiosAdmin();
+            carregarPremios();
+        }
+
+        async function carregarPremiosAdmin() {
+            const { data, error } = await db.from("prizes").select("*").order("created_at", { ascending: false });
+            if (error) { console.error(error); return; }
+
+            document.getElementById("corpoTabelaPremios").innerHTML = (data || []).map(p => `
+                <tr>
+                    <td><img src="${escapeHtml(p.image_url)}" class="prize-image-preview" alt="${escapeHtml(p.name)}"></td>
+                    <td>${escapeHtml(p.name)}</td>
+                    <td>${p.category}</td>
+                    <td>⭐ ${p.cost_points}</td>
+                    <td>${p.stock}</td>
+                    <td>${p.total_sold}</td>
+                    <td>
+                        <div class="action-btns">
+                            <button class="btn-icon view" onclick="abrirEditPremio('${p.id}')"><i class="fa-solid fa-pen"></i></button>
+                        </div>
+                    </td>
+                </tr>`).join("");
+        }
+
+        async function abrirEditPremio(id) {
+            const { data, error } = await db.from("prizes").select("*").eq("id", id).single();
+            if (error || !data) return;
+            document.getElementById("editPremioId").value       = data.id;
+            document.getElementById("editPremioNome").value     = data.name;
+            document.getElementById("editPremioImagem").value   = data.image_url;
+            document.getElementById("editPremioEstoque").value  = data.stock;
+            document.getElementById("editPremioCusto").value    = data.cost_points;
+            document.getElementById("editPremioDescricao").value = data.description || "";
+            document.getElementById("editPremioPreview").src    = data.image_url;
+            document.getElementById("editPremioPreview").style.display = "block";
+            document.getElementById("editPremioModal").classList.add("active");
+        }
+
+        function fecharEditPremioModal() {
+            document.getElementById("editPremioModal").classList.remove("active");
+        }
+
+        async function salvarEdicaoPremio(event) {
+            event.preventDefault();
+            if (currentProfile?.role !== "admin") return;
+            const id = document.getElementById("editPremioId").value;
+
+            const { error } = await db.from("prizes").update({
+                name:        document.getElementById("editPremioNome").value.trim(),
+                image_url:   document.getElementById("editPremioImagem").value.trim(),
+                stock:       parseInt(document.getElementById("editPremioEstoque").value),
+                cost_points: parseInt(document.getElementById("editPremioCusto").value),
+                description: document.getElementById("editPremioDescricao").value.trim(),
+            }).eq("id", id);
+
+            if (error) { mostrarToast("Erro", error.message, "error"); return; }
+
+            fecharEditPremioModal();
+            mostrarToast("Atualizado!", "Prêmio editado.", "success");
+            carregarPremiosAdmin();
+            carregarPremios();
+        }
+
+        // ═══════════════════════════════════════════════════
+        // NAVEGAÇÃO
+        // ═══════════════════════════════════════════════════
+        function showSection(sectionId) {
+            document.querySelectorAll(".section-content").forEach(el => el.classList.add("hidden"));
+            document.querySelectorAll(".nav-item").forEach(el => el.classList.remove("active"));
+            document.getElementById(`section-${sectionId}`)?.classList.remove("hidden");
+            document.querySelector(`[data-section="${sectionId}"]`)?.classList.add("active");
+
+            // Carrega dados ao navegar
+            if (sectionId === "ranking") carregarRanking();
+            if (sectionId === "meus")    carregarMeusResgates();
+            if (sectionId === "premios") carregarPremios();
+            if (sectionId === "admin" && currentProfile?.role === "admin") carregarDadosAdmin();
+        }
+
+        function showAdminTab(tab) {
+            document.querySelectorAll(".admin-section").forEach(el => el.classList.remove("active"));
+            document.querySelectorAll(".admin-tab").forEach(el => el.classList.remove("active"));
+            document.getElementById(`admin-${tab}`)?.classList.add("active");
+            document.querySelector(`[data-tab="${tab}"]`)?.classList.add("active");
+        }
+
+        function toggleMobileMenu() {
+            const nav     = document.getElementById("sidebarNav");
+            const overlay = document.getElementById("sidebarOverlay");
+            const btn     = document.getElementById("mobileMenuBtn");
+            nav.classList.toggle("active");
+            overlay.classList.toggle("active");
+            btn.classList.toggle("active");
+        }
+        function closeMobileMenu() {
+            document.getElementById("sidebarNav").classList.remove("active");
+            document.getElementById("sidebarOverlay").classList.remove("active");
+            document.getElementById("mobileMenuBtn").classList.remove("active");
+        }
+
+        // ═══════════════════════════════════════════════════
+        // UTILS
+        // ═══════════════════════════════════════════════════
+        function mostrarToast(titulo, mensagem, tipo = "success") {
+            const toast = document.getElementById("toast");
+            const icon  = toast.querySelector(".toast-icon i");
+            document.getElementById("toastTitle").textContent   = titulo;
+            document.getElementById("toastMessage").textContent = mensagem;
+            toast.className = `toast ${tipo} show`;
+            icon.className  = tipo === "success" ? "fa-solid fa-check" : "fa-solid fa-xmark";
+            setTimeout(() => toast.classList.remove("show"), 4000);
+        }
+
+        function fecharResultadoModal() {
+            document.getElementById("resultadoModal").classList.remove("active");
+        }
+
+        // Escapa HTML para evitar XSS
+        function escapeHtml(str) {
+            if (typeof str !== "string") return "";
+            return str
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
